@@ -1,0 +1,6 @@
+* #variable= 3 #constraint= 3
+* Example OPB file with a known solution
+min: x1 + x2 + x3 ;
++1 x1 +1 x2 -2 x3 >= 1 ;
++1 x2 -2 x3 >= 2 ;
++1 x1 +1 x3 >= 1 ;
