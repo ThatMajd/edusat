@@ -220,12 +220,21 @@ public:
     int lit(int i) const { return literals[i]; }
     size_t size() const { return literals.size(); }
 
+	void sort() {
+    	std::vector<std::pair<int, int>> pairs;
+    	for (size_t i = 0; i < coefficients.size(); ++i) {
+    		pairs.emplace_back(coefficients[i], literals[i]);
+    	}
 
-    // Reset the clause
-    void reset() {
-        literals.clear();
-        coefficients.clear();
-        degree = 0;
+    	// Explicitly define parameter types for lambda function
+    	std::sort(pairs.begin(), pairs.end(), [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+			return a.first > b.first; // Sort by coefficient descending
+		});
+
+    	for (size_t i = 0; i < pairs.size(); ++i) {
+    		coefficients[i] = pairs[i].first;
+    		literals[i] = pairs[i].second;
+    	}
     }
 
     // Check if the PB clause is satisfied under a given assignment

@@ -1,9 +1,12 @@
 ## Things to implement:
 
 - <s>Write file (opb) parser</s>
-- Sort coeffiecents and variables when creating clause
+- <s>Normalize constraints</s>
+- Sort coefficients and variables when creating clause
 - Modify PBClause
 - Modify Solver
 
 ## Current progress
-- Wrote file parser that uses the same variable encoding as edusat positive -> even and negative -> odd
+### Parser:
+- The file parser uses the same variable encoding as edusat positive -> even and negative -> odd
+- Parser assumes constraint are >=, to normalize the coef we take the positive sum of negative coef and add them to the RHS

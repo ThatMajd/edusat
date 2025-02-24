@@ -111,6 +111,8 @@ void Solver::read_cnf(ifstream& in) {
 void Solver::read_opb(std::ifstream& in) {
     std::string line;
 
+	int left_sum = 0;
+
     while (std::getline(in, line)) {
         // Skip comments and empty lines
         if (line.empty() || line[0] == '*') {
@@ -148,7 +150,8 @@ void Solver::read_opb(std::ifstream& in) {
                     	// this will be constant >=
                         // pb.setComparator(tokens[i]);
 
-                        pb.set_degree(rhs);
+                    	// left_sum used to normalize the constraint by making all coeff non-negative
+                        pb.set_degree(rhs + left_sum);
                     } catch (const std::exception& e) {
                         std::cerr << "Error parsing RHS: " << tokens[i + 1] << std::endl;
                     }
@@ -166,14 +169,22 @@ void Solver::read_opb(std::ifstream& in) {
             const std::string& var_str = tokens[i + 1];
 
             try {
-                // Parse coefficient
+                // Parse coefficient & literal
                 int coeff = std::stoi(coeff_str);
+            	int raw_lit = std::stoi(var_str.substr(1));
+
+            	if (coeff < 0) {
+            		left_sum += -coeff;
+            		raw_lit = -raw_lit;
+            		coeff = -coeff;
+            	}
 
                 // Parse variable (format: xN)
                 if (var_str.empty() || var_str[0] != 'x') {
                     throw std::runtime_error("Invalid variable: " + var_str);
                 }
-                int lit = v2l(std::stoi(var_str.substr(1)));
+
+                int lit = v2l(raw_lit);
 
                 // Add to PBClause
                 pb.insert(lit, coeff);
@@ -190,9 +201,11 @@ void Solver::read_opb(std::ifstream& in) {
             // Add the constraint to the solver
             // (e.g., addConstraint(pb);)
             std::cout << "Parsed constraint: ";
+        	pb.sort();
             pb.print(); // For debugging
         }
     }
+	cout << "Read " << cnf_size() << " clauses in " << cpuTime() - begin_time << " secs." << endl << "Solving..." << endl;
 }
 
 
