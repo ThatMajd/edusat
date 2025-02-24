@@ -2,6 +2,7 @@
 #include "pbextension.h"
 
 Solver S;
+PBSolver PB_S;
 
 using namespace std;
 
@@ -80,8 +81,8 @@ void Solver::read_cnf(ifstream& in) {
 			}
 			case 1: {
 				Lit l = c.cl()[0];
-				// checking if we have conflicting unaries. Sufficiently rare to check it here rather than 
-				// add a check in BCP. 
+				// checking if we have conflicting unaries. Sufficiently rare to check it here rather than
+				// add a check in BCP.
 				if (state[l2v(l)] != VarState::V_UNASSIGNED)
 					if (Neg(l) != (state[l2v(l)] == VarState::V_FALSE)) {
 						S.print_stats();
@@ -89,7 +90,7 @@ void Solver::read_cnf(ifstream& in) {
 					}
 				assert_lit(l);
 				add_unary_clause(l);
-				break; // unary clause. Note we do not add it as a clause. 
+				break; // unary clause. Note we do not add it as a clause.
 			}
 			default: add_clause(c, 0, 1);
 			}
@@ -99,19 +100,29 @@ void Solver::read_cnf(ifstream& in) {
 		}
 		if (Abs(i) > vars) Abort("Literal index larger than declared on the first line", 1);
 		if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) bumpVarScore(abs(i));
-		i = v2l(i);		
+		i = v2l(i);
 		if (ValDecHeuristic == VAL_DEC_HEURISTIC::LITSCORE) bumpLitScore(i);
 		s.insert(i);
-	}	
+	}
 	if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) reset_iterators();
 	cout << "Read " << cnf_size() << " clauses in " << cpuTime() - begin_time << " secs." << endl << "Solving..." << endl;
 }
 
 
-void Solver::read_opb(std::ifstream& in) {
+void PBSolver::read_opb(std::ifstream& in) {
     std::string line;
 
 	int left_sum = 0;
+
+	// TODO this code is temporary and should be changed to parse from the input file
+	int vars = 3;
+	int clauses = 2;
+	cout << "vars: " << vars << " clauses: " << clauses << endl;
+	opb.reserve(clauses);
+
+	set_nvars(vars);
+	set_nclauses(clauses);
+	initialize();
 
     while (std::getline(in, line)) {
         // Skip comments and empty lines
@@ -152,6 +163,8 @@ void Solver::read_opb(std::ifstream& in) {
 
                     	// left_sum used to normalize the constraint by making all coeff non-negative
                         pb.set_degree(rhs + left_sum);
+
+						add_clause(pb, 0, 1);
                     } catch (const std::exception& e) {
                         std::cerr << "Error parsing RHS: " << tokens[i + 1] << std::endl;
                     }
@@ -205,7 +218,7 @@ void Solver::read_opb(std::ifstream& in) {
             pb.print(); // For debugging
         }
     }
-	cout << "Read " << cnf_size() << " clauses in " << cpuTime() - begin_time << " secs." << endl << "Solving..." << endl;
+	cout << "Read " << get_size() << " clauses in " << cpuTime() - begin_time << " secs." << endl << "Solving..." << endl;
 }
 
 
@@ -221,6 +234,13 @@ void Solver::reset() { // invoked initially + every restart
 	conflicts_at_dl.push_back(0);
 }
 
+void PBSolver::reset() { // invoked initially + every restart
+	dl = 0;
+	max_dl = 0;
+	conflicting_clause_idx = -1;
+	separators.push_back(0); // we want separators[1] to match dl=1. separators[0] is not used.
+	conflicts_at_dl.push_back(0);
+}
 
 inline void Solver::reset_iterators(double where) {
 	m_Score2Vars_it = (where == 0) ? m_Score2Vars.begin() : m_Score2Vars.lower_bound(where);
@@ -245,6 +265,25 @@ void Solver::initialize() {
 	m_curr_activity = 0.0f;
 	for (unsigned int v = 0; v <= nvars; ++v) {			
 		m_activity[v] = 0;		
+	}
+	reset();
+}
+
+void PBSolver::initialize() {
+	state.resize(nvars + 1, VarState::V_UNASSIGNED);
+	prev_state.resize(nvars + 1, VarState::V_FALSE); // we set initial assignment with phase-saving to false.
+	antecedent.resize(nvars + 1, -1);
+	marked.resize(nvars+1);
+	dlevel.resize(nvars+1);
+
+	nlits = 2 * nvars;
+	watches.resize(nlits + 1);
+	LitScore.resize(nlits + 1);
+	//initialize scores
+	m_activity.resize(nvars + 1);
+	m_curr_activity = 0.0f;
+	for (unsigned int v = 0; v <= nvars; ++v) {
+		m_activity[v] = 0;
 	}
 	reset();
 }
@@ -305,16 +344,28 @@ void Solver::bumpLitScore(int lit_idx) {
 	LitScore[lit_idx]++;
 }
 
-void Solver::add_clause(Clause& c, int l, int r) {	
+void Solver::add_clause(Clause& c, int l, int r) {
 	Assert(c.size() > 1) ;
 	c.lw_set(l);
 	c.rw_set(r);
-	int loc = static_cast<int>(cnf.size());  // the first is in location 0 in cnf	
+	int loc = static_cast<int>(cnf.size());  // the first is in location 0 in cnf
 	int size = c.size();
-	
-	watches[c.lit(l)].push_back(loc); 
+
+	watches[c.lit(l)].push_back(loc);
 	watches[c.lit(r)].push_back(loc);
 	cnf.push_back(c);
+}
+
+void PBSolver::add_clause(PBClause& c, int l, int r) {
+	Assert(c.size() > 1) ;
+	c.lw_set(l);
+	c.rw_set(r);
+	int loc = static_cast<int>(opb.size());  // the first is in location 0 in cnf
+	int size = c.size();
+
+	watches[c.lit(l)].push_back(loc);
+	watches[c.lit(r)].push_back(loc);
+	opb.push_back(c);
 }
 
 void Solver::add_unary_clause(Lit l) {		
@@ -731,13 +782,11 @@ int main(int argc, char** argv){
 	ifstream in (argv[argc - 1]);
 	if (!in.good()) Abort("cannot read input file", 1);
 	cout << "This is edusat" << endl;
-	S.read_opb(in);
+	PB_S.read_opb(in);
+	// S.read_cnf(in);
 	in.close();
 	S.solve();
 
-	// cout << v2l(1) << endl;
-	// cout << v2l(-2) << endl;
-	// cout << v2l(3) << endl;
-	// cout << v2l(4) << endl;
+
 	return 0;
 }
