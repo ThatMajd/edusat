@@ -109,14 +109,127 @@ void Solver::read_cnf(ifstream& in) {
 }
 
 
+// void PBSolver::read_opb(std::ifstream& in) {
+//     std::string line;
+//
+// 	int left_sum = 0;
+//
+// 	// TODO this code is temporary and should be changed to parse from the input file
+// 	int vars = 3;
+// 	int clauses = 2;
+// 	cout << "vars: " << vars << " clauses: " << clauses << endl;
+// 	opb.reserve(clauses);
+//
+// 	set_nvars(vars);
+// 	set_nclauses(clauses);
+// 	initialize();
+//
+//     while (std::getline(in, line)) {
+//         // Skip comments and empty lines
+//         if (line.empty() || line[0] == '*') {
+//             continue;
+//         }
+//
+//         // Check for objective function (optional)
+//         if (line.substr(0, 4) == "min:") {
+//             std::cout << "Objective function: " << line << std::endl;
+//             continue;
+//         }
+//
+//         // Process constraint line
+//         PBClause pb;
+//         std::vector<std::string> tokens;
+//         std::istringstream iss(line);
+//         std::string token;
+//
+//         // Split line into tokens
+//         while (iss >> token) {
+//             tokens.push_back(token);
+//         }
+//
+//         size_t i = 0;
+//         bool has_terms = false;
+//
+//         // Process terms (coefficient and variable pairs)
+//         while (i < tokens.size()) {
+//             if (tokens[i] == ">=" || tokens[i] == "<=" || tokens[i] == "=") {
+//                 // Parse relational operator and RHS
+//                 if (i + 1 < tokens.size()) {
+//                     try {
+//                         int rhs = std::stoi(tokens[i + 1]);
+//
+//                     	// this will be constant >=
+//                         // pb.setComparator(tokens[i]);
+//
+//                     	// left_sum used to normalize the constraint by making all coeff non-negative
+//                         pb.set_degree(rhs + left_sum);
+//
+// 						add_clause(pb, 0, 1);
+//                     } catch (const std::exception& e) {
+//                         std::cerr << "Error parsing RHS: " << tokens[i + 1] << std::endl;
+//                     }
+//                 }
+//                 break; // End of constraint
+//             }
+//
+//             // Ensure there are enough tokens for a term (coeff + var)
+//             if (i + 1 >= tokens.size()) {
+//                 std::cerr << "Incomplete term in constraint: " << line << std::endl;
+//                 break;
+//             }
+//
+//             const std::string& coeff_str = tokens[i];
+//             const std::string& var_str = tokens[i + 1];
+//
+//             try {
+//                 // Parse coefficient & literal
+//                 int coeff = std::stoi(coeff_str);
+//             	int raw_lit = std::stoi(var_str.substr(1));
+//
+//             	if (coeff < 0) {
+//             		left_sum += -coeff;
+//             		raw_lit = -raw_lit;
+//             		coeff = -coeff;
+//             	}
+//
+//                 // Parse variable (format: xN)
+//                 if (var_str.empty() || var_str[0] != 'x') {
+//                     throw std::runtime_error("Invalid variable: " + var_str);
+//                 }
+//
+//                 int lit = v2l(raw_lit);
+//
+//                 // Add to PBClause
+//                 pb.insert(lit, coeff);
+//                 has_terms = true;
+//             } catch (const std::exception& e) {
+//                 std::cerr << "Error parsing term '" << coeff_str << " " << var_str
+//                           << "': " << e.what() << std::endl;
+//             }
+//
+//             i += 2; // Move to next term
+//         }
+//
+//         if (has_terms) {
+//             // Add the constraint to the solver
+//             // (e.g., addConstraint(pb);)
+//             std::cout << "Parsed constraint: ";
+//         	pb.sort();
+//             pb.print(); // For debugging
+//         }
+//     }
+// 	cout << "Read " << get_size() << " clauses in " << cpuTime() - begin_time << " secs." << endl << "Solving..." << endl;
+// }
+
 void PBSolver::read_opb(std::ifstream& in) {
-    std::string line;
+	int vars, clauses;
 
-	int left_sum = 0;
+	// First line we extract variables and clauses
+	if (!match(in, "* #variable=")) Abort("Expecting `*' in the input file", 1);
+	in >> vars;
+	if (!match(in, " #constraint=")) Abort("No constraints provided", 1);
+	in >> clauses;
 
-	// TODO this code is temporary and should be changed to parse from the input file
-	int vars = 3;
-	int clauses = 2;
 	cout << "vars: " << vars << " clauses: " << clauses << endl;
 	opb.reserve(clauses);
 
@@ -124,104 +237,48 @@ void PBSolver::read_opb(std::ifstream& in) {
 	set_nclauses(clauses);
 	initialize();
 
-    while (std::getline(in, line)) {
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '*') {
-            continue;
-        }
+	// Keep moving until we find constraints
+	while (in.good() && in.peek() != '*') in.get();
+	while (in.good() && in.peek() == '*') skipLine(in);
 
-        // Check for objective function (optional)
-        if (line.substr(0, 4) == "min:") {
-            std::cout << "Objective function: " << line << std::endl;
-            continue;
-        }
+	// Read process the constraints
+	std::string token1, token2;
+	int coef, lit, rhs;
+	int normalization_sum = 0;
 
-        // Process constraint line
-        PBClause pb;
-        std::vector<std::string> tokens;
-        std::istringstream iss(line);
-        std::string token;
+	PBClause pb;
 
-        // Split line into tokens
-        while (iss >> token) {
-            tokens.push_back(token);
-        }
+	while (in.good() && in.peek() != EOF) {
+		in >> token1 >> token2;
+		// cout << token1 << token2 << endl;
+		if (token1 == ">=" || token2 == "=" || token1 == "<=") {
+			// end of constraint
+			if (token1 != ">=") Abort("only >= is supported", 1);
+			rhs = std::stoi(token2);
+			pb.set_degree(rhs + normalization_sum);
+			add_clause(pb, 0, 1);
+			pb.reset();
 
-        size_t i = 0;
-        bool has_terms = false;
+		} else {
+			coef = std::stoi(token1);
+			lit = std::stoi(token2.substr(1));
 
-        // Process terms (coefficient and variable pairs)
-        while (i < tokens.size()) {
-            if (tokens[i] == ">=" || tokens[i] == "<=" || tokens[i] == "=") {
-                // Parse relational operator and RHS
-                if (i + 1 < tokens.size()) {
-                    try {
-                        int rhs = std::stoi(tokens[i + 1]);
+			if (lit > vars) Abort("Literal index larger than declared on the first line", 1);
+			// if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) bumpVarScore(lit);
 
-                    	// this will be constant >=
-                        // pb.setComparator(tokens[i]);
+			if (coef < 0) {
+				normalization_sum += -coef;
+				lit = -lit;
+				coef = -coef;
+			}
+			pb.insert(v2l(lit), coef);
 
-                    	// left_sum used to normalize the constraint by making all coeff non-negative
-                        pb.set_degree(rhs + left_sum);
-
-						add_clause(pb, 0, 1);
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error parsing RHS: " << tokens[i + 1] << std::endl;
-                    }
-                }
-                break; // End of constraint
-            }
-
-            // Ensure there are enough tokens for a term (coeff + var)
-            if (i + 1 >= tokens.size()) {
-                std::cerr << "Incomplete term in constraint: " << line << std::endl;
-                break;
-            }
-
-            const std::string& coeff_str = tokens[i];
-            const std::string& var_str = tokens[i + 1];
-
-            try {
-                // Parse coefficient & literal
-                int coeff = std::stoi(coeff_str);
-            	int raw_lit = std::stoi(var_str.substr(1));
-
-            	if (coeff < 0) {
-            		left_sum += -coeff;
-            		raw_lit = -raw_lit;
-            		coeff = -coeff;
-            	}
-
-                // Parse variable (format: xN)
-                if (var_str.empty() || var_str[0] != 'x') {
-                    throw std::runtime_error("Invalid variable: " + var_str);
-                }
-
-                int lit = v2l(raw_lit);
-
-                // Add to PBClause
-                pb.insert(lit, coeff);
-                has_terms = true;
-            } catch (const std::exception& e) {
-                std::cerr << "Error parsing term '" << coeff_str << " " << var_str
-                          << "': " << e.what() << std::endl;
-            }
-
-            i += 2; // Move to next term
-        }
-
-        if (has_terms) {
-            // Add the constraint to the solver
-            // (e.g., addConstraint(pb);)
-            std::cout << "Parsed constraint: ";
-        	pb.sort();
-            pb.print(); // For debugging
-        }
-    }
+			// if (ValDecHeuristic == VAL_DEC_HEURISTIC::LITSCORE) bumpLitScore(v2l(lit));
+		}
+	}
+	// if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) reset_iterators();
 	cout << "Read " << get_size() << " clauses in " << cpuTime() - begin_time << " secs." << endl << "Solving..." << endl;
 }
-
-
 #pragma endregion readCNF
 
 /******************  Solving ******************************/
@@ -785,7 +842,7 @@ int main(int argc, char** argv){
 	PB_S.read_opb(in);
 	// S.read_cnf(in);
 	in.close();
-	S.solve();
+	// S.solve();
 
 
 	return 0;

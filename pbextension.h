@@ -226,6 +226,7 @@ public:
     int get_lw_lit() const { return literals[lw]; }
     int get_rw_lit() const { return literals[rw]; }
     int lit(int i) const { return literals[i]; }
+	void reset() { literals.clear(), coefficients.clear(); }
     size_t size() const { return literals.size(); }
 
 	void sort() {
