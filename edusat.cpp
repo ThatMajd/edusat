@@ -264,7 +264,7 @@ void PBSolver::read_opb(std::ifstream& in) {
 			lit = std::stoi(token2.substr(1));
 
 			if (lit > vars) Abort("Literal index larger than declared on the first line", 1);
-			// if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) bumpVarScore(lit);
+			if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) bumpVarScore(lit);
 
 			if (coef < 0) {
 				normalization_sum += -coef;
@@ -273,10 +273,10 @@ void PBSolver::read_opb(std::ifstream& in) {
 			}
 			pb.insert(v2l(lit), coef);
 
-			// if (ValDecHeuristic == VAL_DEC_HEURISTIC::LITSCORE) bumpLitScore(v2l(lit));
+			if (ValDecHeuristic == VAL_DEC_HEURISTIC::LITSCORE) bumpLitScore(v2l(lit));
 		}
 	}
-	// if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) reset_iterators();
+	if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) reset_iterators();
 	cout << "Read " << get_size() << " clauses in " << cpuTime() - begin_time << " secs." << endl << "Solving..." << endl;
 }
 #pragma endregion readCNF
@@ -300,6 +300,13 @@ void PBSolver::reset() { // invoked initially + every restart
 }
 
 inline void Solver::reset_iterators(double where) {
+	m_Score2Vars_it = (where == 0) ? m_Score2Vars.begin() : m_Score2Vars.lower_bound(where);
+	Assert(m_Score2Vars_it != m_Score2Vars.end());
+	m_VarsSameScore_it = m_Score2Vars_it->second.begin();
+	m_should_reset_iterators = false;
+}
+
+inline void PBSolver::reset_iterators(double where) {
 	m_Score2Vars_it = (where == 0) ? m_Score2Vars.begin() : m_Score2Vars.lower_bound(where);
 	Assert(m_Score2Vars_it != m_Score2Vars.end());
 	m_VarsSameScore_it = m_Score2Vars_it->second.begin();
@@ -354,7 +361,36 @@ inline void Solver::assert_lit(Lit l) {
 	if (verbose_now()) cout << l2rl(l) <<  " @ " << dl << endl;
 }
 
+inline void PBSolver::assert_lit(Lit l) {
+	trail.push_back(l);
+	int var = l2v(l);
+	if (Neg(l)) prev_state[var] = state[var] = VarState::V_FALSE; else prev_state[var] = state[var] = VarState::V_TRUE;
+	dlevel[var] = dl;
+	++num_assignments;
+	if (verbose_now()) cout << l2rl(l) <<  " @ " << dl << endl;
+}
+
 void Solver::m_rescaleScores(double& new_score) {
+	if (verbose_now()) cout << "Rescale" << endl;
+	new_score /= Rescale_threshold;
+	for (unsigned int i = 1; i <= nvars; i++)
+		m_activity[i] /= Rescale_threshold;
+	m_var_inc /= Rescale_threshold;
+	// rebuilding the scaled-down m_Score2Vars.
+	map<double, unordered_set<Var>, greater<double>> tmp_map;
+	double prev_score = 0.0f;
+	for (auto m : m_Score2Vars) {
+		double scaled_score = m.first / Rescale_threshold;
+		if (scaled_score == prev_score) // This can happen due to rounding
+			tmp_map[scaled_score].insert(m_Score2Vars[m.first].begin(), m_Score2Vars[m.first].end());
+		else
+			tmp_map[scaled_score] = m_Score2Vars[m.first];
+		prev_score = scaled_score;
+	}
+	tmp_map.swap(m_Score2Vars);
+}
+
+void PBSolver::m_rescaleScores(double& new_score) {
 	if (verbose_now()) cout << "Rescale" << endl;
 	new_score /= Rescale_threshold;
 	for (unsigned int i = 1; i <= nvars; i++)
@@ -397,7 +433,34 @@ void Solver::bumpVarScore(int var_idx) {
 		m_Score2Vars[new_score] = unordered_set<int>({ var_idx });
 }
 
+void PBSolver::bumpVarScore(int var_idx) {
+	double new_score;
+	double score = m_activity[var_idx];
+
+	if (score > 0) {
+		Assert(m_Score2Vars.find(score) != m_Score2Vars.end());
+		m_Score2Vars[score].erase(var_idx);
+		if (m_Score2Vars[score].size() == 0) m_Score2Vars.erase(score);
+	}
+	new_score = score + m_var_inc;
+	m_activity[var_idx] = new_score;
+
+	// Rescaling, to avoid overflows;
+	if (new_score > Rescale_threshold) {
+		m_rescaleScores(new_score);
+	}
+
+	if (m_Score2Vars.find(new_score) != m_Score2Vars.end())
+		m_Score2Vars[new_score].insert(var_idx);
+	else
+		m_Score2Vars[new_score] = unordered_set<int>({ var_idx });
+}
+
 void Solver::bumpLitScore(int lit_idx) {
+	LitScore[lit_idx]++;
+}
+
+void PBSolver::bumpLitScore(int lit_idx) {
 	LitScore[lit_idx]++;
 }
 
@@ -450,6 +513,27 @@ int Solver :: getVal(Var v) {
 	return 0;
 }
 
+int PBSolver :: getVal(Var v) {
+	switch (ValDecHeuristic) {
+		case VAL_DEC_HEURISTIC::PHASESAVING: {
+			VarState saved_phase = prev_state[v];
+			switch (saved_phase) {
+				case VarState::V_FALSE:	return v2l(-v);
+				case VarState::V_TRUE: return v2l(v);
+				default: Assert(0);
+			}
+		}
+		case VAL_DEC_HEURISTIC::LITSCORE:
+		{
+			int litp = v2l(v), litn = v2l(-v);
+			int pScore = LitScore[litp], nScore = LitScore[litn];
+			return pScore > nScore ? litp : litn;
+		}
+		default: Assert(0);
+	}
+	return 0;
+}
+
 SolverState Solver::decide(){
 	if (verbose_now()) cout << "decide" << endl;
 	Lit best_lit = 0;	
@@ -458,8 +542,8 @@ SolverState Solver::decide(){
 	switch (VarDecHeuristic) {
 
 	case  VAR_DEC_HEURISTIC::MINISAT: {
-		// m_Score2Vars_r_it and m_VarsSameScore_it are fields. 
-		// When we get here they are the location where we need to start looking. 		
+		// m_Score2Vars_r_it and m_VarsSameScore_it are fields.
+		// When we get here they are the location where we need to start looking.
 		if (m_should_reset_iterators) reset_iterators(m_curr_activity);
 		Var v = 0;
 		int cnt = 0;
@@ -472,7 +556,7 @@ SolverState Solver::decide(){
 				if (state[v] == VarState::V_UNASSIGNED) { // found a var to assign
 					m_curr_activity = m_Score2Vars_it->first;
 					assert(m_curr_activity == m_activity[v]);
-					best_lit = getVal(v);					
+					best_lit = getVal(v);
 					goto Apply_decision;
 				}
 			}
@@ -483,7 +567,7 @@ SolverState Solver::decide(){
 		break;
 	}
 	default: Assert(0);
-	}	
+	}
 		
 	assert(!best_lit);
 	S.print_state(Assignment_file);
@@ -504,6 +588,63 @@ Apply_decision:
 	
 	assert_lit(best_lit);
 	++num_decisions;	
+	return SolverState::UNDEF;
+}
+
+SolverState PBSolver::decide(){
+	if (verbose_now()) cout << "decide" << endl;
+	Lit best_lit = 0;
+	int max_score = 0;
+	Var bestVar = 0;
+	switch (VarDecHeuristic) {
+
+		case  VAR_DEC_HEURISTIC::MINISAT: {
+			// m_Score2Vars_r_it and m_VarsSameScore_it are fields.
+			// When we get here they are the location where we need to start looking.
+			if (m_should_reset_iterators) reset_iterators(m_curr_activity);
+			Var v = 0;
+			int cnt = 0;
+			if (m_Score2Vars_it == m_Score2Vars.end()) break;
+			while (true) { // scores from high to low
+				while (m_VarsSameScore_it != m_Score2Vars_it->second.end()) {
+					v = *m_VarsSameScore_it;
+					++m_VarsSameScore_it;
+					++cnt;
+					if (state[v] == VarState::V_UNASSIGNED) { // found a var to assign
+						m_curr_activity = m_Score2Vars_it->first;
+						assert(m_curr_activity == m_activity[v]);
+						best_lit = getVal(v);
+						goto Apply_decision;
+					}
+				}
+				++m_Score2Vars_it;
+				if (m_Score2Vars_it == m_Score2Vars.end()) break;
+				m_VarsSameScore_it = m_Score2Vars_it->second.begin();
+			}
+			break;
+		}
+		default: Assert(0);
+	}
+
+	assert(!best_lit);
+	S.print_state(Assignment_file);
+	return SolverState::SAT;
+
+
+	Apply_decision:
+		dl++; // increase decision level
+	if (dl > max_dl) {
+		max_dl = dl;
+		separators.push_back(trail.size());
+		conflicts_at_dl.push_back(num_learned);
+	}
+	else {
+		separators[dl] = trail.size();
+		conflicts_at_dl[dl] = num_learned;
+	}
+
+	assert_lit(best_lit);
+	++num_decisions;
 	return SolverState::UNDEF;
 }
 
@@ -614,6 +755,69 @@ SolverState Solver::BCP() {
 	return SolverState::UNDEF;
 }
 
+SolverState PBSolver::BCP() {
+	return SolverState::UNDEF;
+
+	// if (verbose_now()) cout << "BCP" << endl;
+	// if (verbose_now()) cout << "qhead = " << qhead << " trail-size = " << trail.size() << endl;
+	// while (qhead < trail.size()) {
+	// 	Lit NegatedLit = ::negate(trail[qhead++]);
+	// 	Assert(lit_state(NegatedLit) == LitState::L_UNSAT);
+	// 	if (verbose_now()) cout << "propagating " << l2rl(::negate(NegatedLit)) << endl;
+	// 	vector<int> new_watch_list; // The original watch list minus those clauses that changed a watch. The order is maintained.
+	// 	int new_watch_list_idx = watches[NegatedLit].size() - 1; // Since we are traversing the watch_list backwards, this index goes down.
+	// 	new_watch_list.resize(watches[NegatedLit].size());
+	// 	for (vector<int>::reverse_iterator it = watches[NegatedLit].rbegin(); it != watches[NegatedLit].rend() && conflicting_clause_idx < 0; ++it) {
+	// 		Clause& c = cnf[*it];
+	// 		Lit l_watch = c.get_lw_lit(),
+	// 			r_watch = c.get_rw_lit();
+	// 		bool binary = c.size() == 2;
+	// 		bool is_left_watch = (l_watch == NegatedLit);
+	// 		Lit other_watch = is_left_watch? r_watch: l_watch;
+	// 		int NewWatchLocation;
+	// 		ClauseState res = c.next_not_false(is_left_watch, other_watch, binary, NewWatchLocation);
+	// 		if (res != ClauseState::C_UNDEF) new_watch_list[new_watch_list_idx--] = *it; //in all cases but the move-watch_lit case we leave watch_lit where it is
+	// 		switch (res) {
+	// 		case ClauseState::C_UNSAT: { // conflict
+	// 			if (verbose_now()) print_state();
+	// 			if (dl == 0) return SolverState::UNSAT;
+	// 			conflicting_clause_idx = *it;  // this will also break the loop
+	// 			 int dist = distance(it, watches[NegatedLit].rend()) - 1; // # of entries in watches[NegatedLit] that were not yet processed when we hit this conflict.
+	// 			// Copying the remaining watched clauses:
+	// 			for (int i = dist - 1; i >= 0; i--) {
+	// 				new_watch_list[new_watch_list_idx--] = watches[NegatedLit][i];
+	// 			}
+	// 			if (verbose_now()) cout << "conflict" << endl;
+	// 			break;
+	// 		}
+	// 		case ClauseState::C_SAT:
+	// 			if (verbose_now()) cout << "clause is sat" << endl;
+	// 			break; // nothing to do when clause has a satisfied literal.
+	// 		case ClauseState::C_UNIT: { // new implication
+	// 			if (verbose_now()) cout << "propagating: ";
+	// 			assert_lit(other_watch);
+	// 			antecedent[l2v(other_watch)] = *it;
+	// 			if (verbose_now()) cout << "new implication <- " << l2rl(other_watch) << endl;
+	// 			break;
+	// 		}
+	// 		default: // replacing watch_lit
+	// 			Assert(NewWatchLocation < static_cast<int>(c.size()));
+	// 			int new_lit = c.lit(NewWatchLocation);
+	// 			watches[new_lit].push_back(*it);
+	// 			if (verbose_now()) { c.print_real_lits(); cout << " now watched by " << l2rl(new_lit) << endl;}
+	// 		}
+	// 	}
+	// 	// resetting the list of clauses watched by this literal.
+	// 	watches[NegatedLit].clear();
+	// 	new_watch_list_idx++; // just because of the redundant '--' at the end.
+	// 	watches[NegatedLit].insert(watches[NegatedLit].begin(), new_watch_list.begin() + new_watch_list_idx, new_watch_list.end());
+	//
+	// 	//print_watches();
+	// 	if (conflicting_clause_idx >= 0) return SolverState::CONFLICT;
+	// 	new_watch_list.clear();
+	// }
+	// return SolverState::UNDEF;
+}
 
 /*******************************************************************************************************************
 name: analyze
@@ -804,6 +1008,29 @@ void Solver::solve() {
 	return;
 }
 
+void PBSolver::solve() {
+	SolverState res = _solve();
+	Assert(res == SolverState::SAT || res == SolverState::UNSAT || res == SolverState::TIMEOUT);
+	S.print_stats();
+	switch (res) {
+		case SolverState::SAT: {
+			S.validate_assignment();
+			string str = "solution in ",
+				str1 = Assignment_file;
+			cout << str + str1 << endl;
+			cout << "SAT" << endl;
+			break;
+		}
+		case SolverState::UNSAT:
+			cout << "UNSAT" << endl;
+		break;
+		case SolverState::TIMEOUT:
+			cout << "TIMEOUT" << endl;
+		return;
+	}
+	return;
+}
+
 SolverState Solver::_solve() {
 	SolverState res;
 	while (true) {
@@ -813,6 +1040,23 @@ SolverState Solver::_solve() {
 			if (res == SolverState::UNSAT) return res;
 			if (res == SolverState::CONFLICT)
 				backtrack(analyze(cnf[conflicting_clause_idx]));
+			else break;
+		}
+		res = decide();
+		if (res == SolverState::SAT) return res;
+	}
+}
+
+SolverState PBSolver::_solve() {
+	SolverState res;
+	while (true) {
+		if (timeout > 0 && cpuTime() - begin_time > timeout) return SolverState::TIMEOUT;
+		while (true) {
+			res = BCP();
+			if (res == SolverState::UNSAT) return res;
+			if (res == SolverState::CONFLICT)
+				cout << "CONFLICT" << endl;
+				// backtrack(analyze(opb[conflicting_clause_idx]));
 			else break;
 		}
 		res = decide();
@@ -842,6 +1086,7 @@ int main(int argc, char** argv){
 	PB_S.read_opb(in);
 	// S.read_cnf(in);
 	in.close();
+	// PB_S.solve();
 	// S.solve();
 
 
