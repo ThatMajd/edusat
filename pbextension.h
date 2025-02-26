@@ -83,6 +83,14 @@ enum class ClauseState {
 	C_UNDEF
 };
 
+enum class PBClauseState {
+	PB_UNDEF,
+	PB_SAT,
+	PB_UNIT,
+	PB_UNSAT,
+	PB_WATCH_UPDATE
+};
+
 enum class SolverState{
 	UNSAT,
 	SAT,
@@ -228,6 +236,8 @@ public:
     int lit(int i) const { return literals[i]; }
 	void reset() { literals.clear(), coefficients.clear(); }
     size_t size() const { return literals.size(); }
+
+	inline PBClauseState next_not_false(bool is_left_watch, Lit other_watch, bool binary, int& loc);
 
 	void sort() {
     	std::vector<std::pair<int, int>> pairs;

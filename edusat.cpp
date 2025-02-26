@@ -671,6 +671,81 @@ inline ClauseState Clause::next_not_false(bool is_left_watch, Lit other_watch, b
 	}
 }
 
+inline PBClauseState PBClause::next_not_false(bool is_left_watch, Lit other_watch, bool binary, int& loc) {
+    if (verbose_now()) cout << "pb_next_not_false" << endl;
+
+    // Compute S_val = sum(coefficients for literals assigned true)
+    // and R_val = sum(coefficients for unassigned literals)
+    int S_val = 0;
+    int R_val = 0;
+    for (size_t i = 0; i < literals.size(); ++i) {
+        LitState ls = PB_S.lit_state(literals[i]); // Assuming access to solver state S.
+        if (ls == LitState::L_SAT)
+            S_val += coefficients[i];
+        else if (ls == LitState::L_UNASSIGNED)
+            R_val += coefficients[i];
+    }
+
+    // Check if the constraint is already satisfied.
+    if (S_val >= degree)
+        return PBClauseState::PB_SAT;
+
+    // Conflict: Even if all unassigned literals become true, threshold cannot be met.
+    if (S_val + R_val < degree) {
+        if (verbose_now()) {
+            print_real_lits();
+            cout << " is conflicting" << endl;
+        }
+        return PBClauseState::PB_UNSAT;
+    }
+
+    // If clause is not binary, try to find another literal (other than other_watch) to watch.
+    if (!binary) {
+        for (size_t i = 0; i < literals.size(); ++i) {
+            if (literals[i] == other_watch)
+                continue;
+            if (S.lit_state(literals[i]) != LitState::L_UNSAT) { // Found a candidate.
+                loc = i;
+                if (is_left_watch)
+                    lw = i;
+                else
+                    rw = i;
+                return PBClauseState::PB_UNDEF; // No propagation; watch updated.
+            }
+        }
+    }
+
+    // No replacement found: Check if the other watched literal forces an implication.
+    int coeff_other = -1;
+    for (size_t i = 0; i < literals.size(); ++i) {
+        if (literals[i] == other_watch) {
+            coeff_other = coefficients[i];
+            break;
+        }
+    }
+    Assert(coeff_other != -1); // Must find other_watch in the clause.
+
+    // Use the forced condition: if other_watch is unassigned and without its contribution
+    // the total possible sum is below the threshold, then it must be set to true.
+    switch (S.lit_state(other_watch)) {
+        case LitState::L_UNSAT:
+            if (verbose_now()) {
+                print_real_lits();
+                cout << " is conflicting" << endl;
+            }
+            return PBClauseState::PB_UNSAT;
+        case LitState::L_UNASSIGNED:
+            if (S_val + (R_val - coeff_other) < degree)
+                return PBClauseState::PB_UNIT;
+            return PBClauseState::PB_UNDEF;
+        case LitState::L_SAT:
+            return PBClauseState::PB_SAT;
+        default:
+            Assert(0);
+            return PBClauseState::PB_UNDEF;
+    }
+}
+
 void Solver::test() { // tests that each clause is watched twice. 	
 	for (unsigned int idx = 0; idx < cnf.size(); ++idx) {
 		Clause c = cnf[idx];
@@ -696,17 +771,19 @@ void Solver::test() { // tests that each clause is watched twice.
 SolverState Solver::BCP() {
 	if (verbose_now()) cout << "BCP" << endl;
 	if (verbose_now()) cout << "qhead = " << qhead << " trail-size = " << trail.size() << endl;
-	while (qhead < trail.size()) { 
+	while (qhead < trail.size()) {
 		Lit NegatedLit = ::negate(trail[qhead++]);
 		Assert(lit_state(NegatedLit) == LitState::L_UNSAT);
 		if (verbose_now()) cout << "propagating " << l2rl(::negate(NegatedLit)) << endl;
-		vector<int> new_watch_list; // The original watch list minus those clauses that changed a watch. The order is maintained. 
+
+
+		vector<int> new_watch_list; // The original watch list minus those clauses that changed a watch. The order is maintained.
 		int new_watch_list_idx = watches[NegatedLit].size() - 1; // Since we are traversing the watch_list backwards, this index goes down.
 		new_watch_list.resize(watches[NegatedLit].size());
 		for (vector<int>::reverse_iterator it = watches[NegatedLit].rbegin(); it != watches[NegatedLit].rend() && conflicting_clause_idx < 0; ++it) {
 			Clause& c = cnf[*it];
-			Lit l_watch = c.get_lw_lit(), 
-				r_watch = c.get_rw_lit();			
+			Lit l_watch = c.get_lw_lit(),
+				r_watch = c.get_rw_lit();
 			bool binary = c.size() == 2;
 			bool is_left_watch = (l_watch == NegatedLit);
 			Lit other_watch = is_left_watch? r_watch: l_watch;
@@ -714,11 +791,11 @@ SolverState Solver::BCP() {
 			ClauseState res = c.next_not_false(is_left_watch, other_watch, binary, NewWatchLocation);
 			if (res != ClauseState::C_UNDEF) new_watch_list[new_watch_list_idx--] = *it; //in all cases but the move-watch_lit case we leave watch_lit where it is
 			switch (res) {
-			case ClauseState::C_UNSAT: { // conflict				
+			case ClauseState::C_UNSAT: { // conflict
 				if (verbose_now()) print_state();
-				if (dl == 0) return SolverState::UNSAT;				
+				if (dl == 0) return SolverState::UNSAT;
 				conflicting_clause_idx = *it;  // this will also break the loop
-				 int dist = distance(it, watches[NegatedLit].rend()) - 1; // # of entries in watches[NegatedLit] that were not yet processed when we hit this conflict. 
+				 int dist = distance(it, watches[NegatedLit].rend()) - 1; // # of entries in watches[NegatedLit] that were not yet processed when we hit this conflict.
 				// Copying the remaining watched clauses:
 				for (int i = dist - 1; i >= 0; i--) {
 					new_watch_list[new_watch_list_idx--] = watches[NegatedLit][i];
@@ -726,10 +803,10 @@ SolverState Solver::BCP() {
 				if (verbose_now()) cout << "conflict" << endl;
 				break;
 			}
-			case ClauseState::C_SAT: 
+			case ClauseState::C_SAT:
 				if (verbose_now()) cout << "clause is sat" << endl;
 				break; // nothing to do when clause has a satisfied literal.
-			case ClauseState::C_UNIT: { // new implication				
+			case ClauseState::C_UNIT: { // new implication
 				if (verbose_now()) cout << "propagating: ";
 				assert_lit(other_watch);
 				antecedent[l2v(other_watch)] = *it;
@@ -745,7 +822,7 @@ SolverState Solver::BCP() {
 		}
 		// resetting the list of clauses watched by this literal.
 		watches[NegatedLit].clear();
-		new_watch_list_idx++; // just because of the redundant '--' at the end. 		
+		new_watch_list_idx++; // just because of the redundant '--' at the end.
 		watches[NegatedLit].insert(watches[NegatedLit].begin(), new_watch_list.begin() + new_watch_list_idx, new_watch_list.end());
 
 		//print_watches();
@@ -756,67 +833,75 @@ SolverState Solver::BCP() {
 }
 
 SolverState PBSolver::BCP() {
-	return SolverState::UNDEF;
+    if (verbose_now()) cout << "BCP" << endl;
+    if (verbose_now()) cout << "qhead = " << qhead << " trail-size = " << trail.size() << endl;
+    while (qhead < trail.size()) {
+        Lit NegatedLit = ::negate(trail[qhead++]);
+        Assert(lit_state(NegatedLit) == LitState::L_UNSAT);
+        if (verbose_now()) cout << "propagating " << l2rl(::negate(NegatedLit)) << endl;
 
-	// if (verbose_now()) cout << "BCP" << endl;
-	// if (verbose_now()) cout << "qhead = " << qhead << " trail-size = " << trail.size() << endl;
-	// while (qhead < trail.size()) {
-	// 	Lit NegatedLit = ::negate(trail[qhead++]);
-	// 	Assert(lit_state(NegatedLit) == LitState::L_UNSAT);
-	// 	if (verbose_now()) cout << "propagating " << l2rl(::negate(NegatedLit)) << endl;
-	// 	vector<int> new_watch_list; // The original watch list minus those clauses that changed a watch. The order is maintained.
-	// 	int new_watch_list_idx = watches[NegatedLit].size() - 1; // Since we are traversing the watch_list backwards, this index goes down.
-	// 	new_watch_list.resize(watches[NegatedLit].size());
-	// 	for (vector<int>::reverse_iterator it = watches[NegatedLit].rbegin(); it != watches[NegatedLit].rend() && conflicting_clause_idx < 0; ++it) {
-	// 		Clause& c = cnf[*it];
-	// 		Lit l_watch = c.get_lw_lit(),
-	// 			r_watch = c.get_rw_lit();
-	// 		bool binary = c.size() == 2;
-	// 		bool is_left_watch = (l_watch == NegatedLit);
-	// 		Lit other_watch = is_left_watch? r_watch: l_watch;
-	// 		int NewWatchLocation;
-	// 		ClauseState res = c.next_not_false(is_left_watch, other_watch, binary, NewWatchLocation);
-	// 		if (res != ClauseState::C_UNDEF) new_watch_list[new_watch_list_idx--] = *it; //in all cases but the move-watch_lit case we leave watch_lit where it is
-	// 		switch (res) {
-	// 		case ClauseState::C_UNSAT: { // conflict
-	// 			if (verbose_now()) print_state();
-	// 			if (dl == 0) return SolverState::UNSAT;
-	// 			conflicting_clause_idx = *it;  // this will also break the loop
-	// 			 int dist = distance(it, watches[NegatedLit].rend()) - 1; // # of entries in watches[NegatedLit] that were not yet processed when we hit this conflict.
-	// 			// Copying the remaining watched clauses:
-	// 			for (int i = dist - 1; i >= 0; i--) {
-	// 				new_watch_list[new_watch_list_idx--] = watches[NegatedLit][i];
-	// 			}
-	// 			if (verbose_now()) cout << "conflict" << endl;
-	// 			break;
-	// 		}
-	// 		case ClauseState::C_SAT:
-	// 			if (verbose_now()) cout << "clause is sat" << endl;
-	// 			break; // nothing to do when clause has a satisfied literal.
-	// 		case ClauseState::C_UNIT: { // new implication
-	// 			if (verbose_now()) cout << "propagating: ";
-	// 			assert_lit(other_watch);
-	// 			antecedent[l2v(other_watch)] = *it;
-	// 			if (verbose_now()) cout << "new implication <- " << l2rl(other_watch) << endl;
-	// 			break;
-	// 		}
-	// 		default: // replacing watch_lit
-	// 			Assert(NewWatchLocation < static_cast<int>(c.size()));
-	// 			int new_lit = c.lit(NewWatchLocation);
-	// 			watches[new_lit].push_back(*it);
-	// 			if (verbose_now()) { c.print_real_lits(); cout << " now watched by " << l2rl(new_lit) << endl;}
-	// 		}
-	// 	}
-	// 	// resetting the list of clauses watched by this literal.
-	// 	watches[NegatedLit].clear();
-	// 	new_watch_list_idx++; // just because of the redundant '--' at the end.
-	// 	watches[NegatedLit].insert(watches[NegatedLit].begin(), new_watch_list.begin() + new_watch_list_idx, new_watch_list.end());
-	//
-	// 	//print_watches();
-	// 	if (conflicting_clause_idx >= 0) return SolverState::CONFLICT;
-	// 	new_watch_list.clear();
-	// }
-	// return SolverState::UNDEF;
+        vector<int> new_watch_list;
+        int new_watch_list_idx = watches[NegatedLit].size() - 1;
+        new_watch_list.resize(watches[NegatedLit].size());
+
+        // Process all PB constraints that watch NegatedLit.
+        for (auto it = watches[NegatedLit].rbegin(); it != watches[NegatedLit].rend() && conflicting_clause_idx < 0; ++it) {
+        	PBClause& c = opb[*it]; // Use the PB clause database.
+        	bool is_left_watch = (c.get_lw_lit() == NegatedLit);
+        	Lit other_watch = is_left_watch ? c.get_rw_lit() : c.get_lw_lit();
+        	int NewWatchLocation;
+        	bool binary = c.size() == 2;
+        	PBClauseState res = c.next_not_false(is_left_watch, other_watch, binary, NewWatchLocation);
+            if (res != PBClauseState::PB_UNDEF)
+                new_watch_list[new_watch_list_idx--] = *it;
+
+            switch (res) {
+            case PBClauseState::PB_UNSAT: {
+                if (verbose_now()) print_state();
+                if (dl == 0) return SolverState::UNSAT;
+                conflicting_clause_idx = *it;
+                int dist = distance(it, watches[NegatedLit].rend()) - 1;
+                for (int i = dist - 1; i >= 0; i--) {
+                    new_watch_list[new_watch_list_idx--] = watches[NegatedLit][i];
+                }
+                if (verbose_now()) cout << "conflict" << endl;
+                break;
+            }
+            case PBClauseState::PB_SAT:
+                if (verbose_now()) cout << "PB constraint is satisfied" << endl;
+                break;
+            case PBClauseState::PB_UNIT: { // new implication
+                if (verbose_now()) cout << "propagating: ";
+                assert_lit(other_watch);
+                antecedent[l2v(other_watch)] = *it;
+                if (verbose_now()) cout << "new implication <- " << l2rl(other_watch) << endl;
+                break;
+            }
+            case PBClauseState::PB_WATCH_UPDATE: {
+	            // Update the watch: move the watch from NegatedLit to a new literal.
+            	Assert(NewWatchLocation < static_cast<int>(c.size()));
+            	int new_lit = c.lit(NewWatchLocation);
+            	watches[new_lit].push_back(*it);
+            	if (verbose_now()) {
+            		c.print_real_lits();
+            		cout << " now watched by " << l2rl(new_lit) << endl;
+            	}
+            	break;
+            }
+            default:
+                break;
+            }
+        }
+        // Reset the watch list for NegatedLit.
+        watches[NegatedLit].clear();
+        new_watch_list_idx++; // adjust for the final decrement.
+        watches[NegatedLit].insert(watches[NegatedLit].begin(),
+                                    new_watch_list.begin() + new_watch_list_idx,
+                                    new_watch_list.end());
+        if (conflicting_clause_idx >= 0)
+            return SolverState::CONFLICT;
+    }
+    return SolverState::UNDEF;
 }
 
 /*******************************************************************************************************************
@@ -1086,7 +1171,7 @@ int main(int argc, char** argv){
 	PB_S.read_opb(in);
 	// S.read_cnf(in);
 	in.close();
-	// PB_S.solve();
+	PB_S.solve();
 	// S.solve();
 
 
