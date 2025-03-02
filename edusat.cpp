@@ -627,7 +627,7 @@ SolverState PBSolver::decide(){
 	}
 
 	assert(!best_lit);
-	S.print_state(Assignment_file);
+	PB_S.print_state(Assignment_file);
 	return SolverState::SAT;
 
 
@@ -676,6 +676,9 @@ inline PBClauseState PBClause::next_not_false(bool is_left_watch, Lit other_watc
 
     // Compute S_val = sum(coefficients for literals assigned true)
     // and R_val = sum(coefficients for unassigned literals)
+
+	// slack = R_val + S_val - degree
+
     int S_val = 0;
     int R_val = 0;
     for (size_t i = 0; i < literals.size(); ++i) {
@@ -872,8 +875,34 @@ SolverState PBSolver::BCP() {
                 break;
             case PBClauseState::PB_UNIT: { // new implication
                 if (verbose_now()) cout << "propagating: ";
-                assert_lit(other_watch);
-                antecedent[l2v(other_watch)] = *it;
+            	// Recompute the sums over the clause.
+            	int S_val = 0;  // Sum of coefficients for literals assigned true.
+            	int nonFalsifiedSum = 0;  // Sum for literals not falsified (true or unassigned).
+            	for (size_t i = 0; i < c.size(); i++) {
+            		LitState ls = S.lit_state(c.get_literals()[i]);
+            		if (ls == LitState::L_SAT) {
+            			S_val += c.get_coefficients()[i];
+            			nonFalsifiedSum += c.get_coefficients()[i];
+            		} else if (ls == LitState::L_UNASSIGNED) {
+            			nonFalsifiedSum += c.get_coefficients()[i];
+            		}
+            		// If a literal is false, it contributes 0.
+            	}
+
+            	// Compute slack: the amount by which the non-falsified sum exceeds the threshold.
+            	int slack = nonFalsifiedSum - c.get_degree();
+
+            	// Propagate every unassigned literal whose coefficient exceeds the slack.
+            	for (size_t i = 0; i < c.size(); i++) {
+            		if (S.lit_state(c.get_literals()[i]) == LitState::L_UNASSIGNED && c.get_coefficients()[i] > slack) {
+            			if (verbose_now()) cout << l2rl(c.get_literals()[i]) << " ";
+            			assert_lit(c.get_literals()[i]);  // Propagate this literal.
+            			antecedent[l2v(c.get_literals()[i])] = *it;  // Record the implication.
+            		}
+            	}
+
+                // assert_lit(other_watch);
+                // antecedent[l2v(other_watch)] = *it;
                 if (verbose_now()) cout << "new implication <- " << l2rl(other_watch) << endl;
                 break;
             }
@@ -992,6 +1021,174 @@ int Solver::analyze(const Clause conflicting) {
 	return bktrk; 
 }
 
+int PBSolver::analyze(const PBClause conflicting) {
+    if (verbose_now()) cout << "analyze" << endl;
+
+    PBClause current_clause = conflicting,
+             new_clause;
+
+    int resolve_num = 0,
+        bktrk = 0,
+        watch_lit = 0, // points to what literal in the learnt clause should be watched, other than the asserting one
+        antecedents_idx = 0;
+
+    Lit u;
+    Var v;
+    trail_t::reverse_iterator t_it = trail.rbegin();
+
+    do {
+        // Store the literals and coefficients for easier access
+        clause_t& current_literals = current_clause.get_literals();
+        vector<int>& current_coeffs = current_clause.get_coefficients();
+
+        // Process current clause's literals
+        for (size_t i = 0; i < current_literals.size(); ++i) {
+            Lit lit = current_literals[i];
+            int coeff = current_coeffs[i];
+
+            v = l2v(lit);
+        	VarState var_state = state[v];
+        	if (var_state == VarState::V_UNASSIGNED) continue;
+            if (!marked[v]) {
+                marked[v] = true;
+                if (dlevel[v] == dl) {
+                    ++resolve_num;
+                }
+                else { // literals from previous decision levels are entered to the learned clause
+                    new_clause.insert(lit, coeff); // Use actual coefficient, not just 1
+
+                    if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) {
+                    	if (verbose_now()) cout << "--------" << "bumping" << v << endl;
+	                    bumpVarScore(v);
+                    }
+                    if (ValDecHeuristic == VAL_DEC_HEURISTIC::LITSCORE) bumpLitScore(lit);
+
+                    int c_dl = dlevel[v];
+                    if (c_dl > bktrk) {
+                        bktrk = c_dl;
+                        watch_lit = new_clause.size() - 1;
+                    }
+                }
+            }
+            else {
+                // If literal already in new_clause, merge coefficients
+                clause_t& new_literals = new_clause.get_literals();
+                vector<int>& new_coeffs = new_clause.get_coefficients();
+                bool found = false;
+
+                for (size_t j = 0; j < new_literals.size(); ++j) {
+                    if (new_literals[j] == lit) {
+                        new_coeffs[j] += coeff;
+                        found = true;
+                        break;
+                    }
+                }
+
+                // If the literal isn't in new_clause yet, we don't add it
+                // This is correct because it's marked, so it must be a reason literal at the current decision level
+            }
+        }
+
+        // Find the next literal to resolve on
+        while (t_it != trail.rend()) {
+            u = *t_it;
+            v = l2v(u);
+            ++t_it;
+            if (marked[v]) break;
+        }
+
+        marked[v] = false;
+        --resolve_num;
+        if (!resolve_num) continue;
+
+        int ant = antecedent[v];
+        current_clause = opb[ant];
+
+        // For PB constraints, we need to remove the literal and adjust the degree
+        clause_t& literals = current_clause.get_literals();
+        vector<int>& coeffs = current_clause.get_coefficients();
+
+        // Find the position of u in the literals
+        for (size_t i = 0; i < literals.size(); ++i) {
+            if (literals[i] == u) {
+                // Store the coefficient before removing
+                int u_coeff = coeffs[i];
+
+                // Remove the literal and its coefficient
+                literals.erase(literals.begin() + i);
+                coeffs.erase(coeffs.begin() + i);
+
+                // Adjust the degree based on the removed literal's coefficient
+                current_clause.set_degree(current_clause.get_degree() - u_coeff);
+
+                break;
+            }
+        }
+    } while (resolve_num > 0);
+
+    // Clear marks
+    clause_t& new_literals = new_clause.get_literals();
+    for (clause_it it = new_literals.begin(); it != new_literals.end(); ++it) {
+        marked[l2v(*it)] = false;
+    }
+
+    // Add the negation of the last resolved literal (the asserting literal)
+    Lit asserting_lit = ::negate(u);
+
+    // Calculate appropriate coefficient for the asserting literal
+    // For PB constraints, we need to calculate coefficient carefully
+    int max_falsified_sum = 0;
+    vector<int>& new_coeffs = new_clause.get_coefficients();
+    for (size_t i = 0; i < new_literals.size(); ++i) {
+        max_falsified_sum += new_coeffs[i];
+    }
+
+    // Add the asserting literal with an appropriate coefficient
+    // In many PB solvers this is set to 1, but it could be calculated more precisely
+    // based on your specific resolution strategy
+    int asserting_coeff = 1;
+    new_clause.insert(asserting_lit, asserting_coeff);
+
+    // Calculate the degree for the new clause
+    // The degree should be just enough to force unit propagation of the asserting literal
+    // when all other literals are falsified
+    int new_degree = max_falsified_sum + 1 - asserting_coeff;
+
+    // Ensure the degree is at least 1
+    if (new_degree <= 0) new_degree = 1;
+
+    // Set the degree for the new clause
+    new_clause.set_degree(new_degree);
+
+    // Normalize the constraint to maintain canonical form
+    // normalizeConstraint(new_clause);
+
+    if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) {
+        m_var_inc *= 1 / var_decay; // increasing importance of participating variables
+    }
+
+    ++num_learned;
+    asserted_lit = asserting_lit;
+
+    add_clause(new_clause, watch_lit, new_clause.size() - 1);
+
+    if (verbose_now()) {
+        cout << "Learned PB constraint #" << get_size() << ". ";
+        new_clause.print_real_lits();
+        cout << " >= " << new_clause.get_degree();
+        cout << endl;
+        cout << " learnt constraints: " << num_learned;
+        cout << " Backtracking to level " << bktrk << endl;
+    }
+
+    if (verbose >= 1 && !(num_learned % 1000)) {
+        cout << "Learned: " << num_learned << " constraints" << endl;
+    }
+
+    return bktrk;
+}
+
+
 void Solver::backtrack(int k) {
 	if (verbose_now()) cout << "backtrack" << endl;
 	// local restart means that we restart if the number of conflicts learned in this 
@@ -1016,6 +1213,33 @@ void Solver::backtrack(int k) {
 	dl = k;	
 	assert_lit(asserted_lit);
 	antecedent[l2v(asserted_lit)] = cnf.size() - 1;
+	conflicting_clause_idx = -1;
+}
+
+void PBSolver::backtrack(int k) {
+	if (verbose_now()) cout << "backtrack" << endl;
+	// local restart means that we restart if the number of conflicts learned in this
+	// decision level has passed the threshold.
+	if (k > 0 && (num_learned - conflicts_at_dl[k] > restart_threshold)) {	// "local restart"
+		restart();
+		return;
+	}
+	static int counter = 0;
+
+	for (trail_t::iterator it = trail.begin() + separators[k+1]; it != trail.end(); ++it) { // erasing from k+1
+		Var v = l2v(*it);
+		if (dlevel[v]) { // we need the condition because of learnt unary clauses. In that case we enforce an assignment with dlevel = 0.
+			state[v] = VarState::V_UNASSIGNED;
+			if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) m_curr_activity = max(m_curr_activity, m_activity[v]);
+		}
+	}
+	if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) m_should_reset_iterators = true;
+	if (verbose_now()) print_state();
+	trail.erase(trail.begin() + separators[k+1], trail.end());
+	qhead = trail.size();
+	dl = k;
+	assert_lit(asserted_lit);
+	antecedent[l2v(asserted_lit)] = opb.size() - 1;
 	conflicting_clause_idx = -1;
 }
 
@@ -1065,6 +1289,32 @@ void Solver::restart() {
 	conflicts_at_dl.clear(); 
 	if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) {
 		m_curr_activity = 0; // The activity does not really become 0. When it is reset in decide() it becomes the largets activity. 
+		m_should_reset_iterators = true;
+	}
+	reset();
+}
+
+void PBSolver::restart() {
+	if (verbose_now()) cout << "restart" << endl;
+	restart_threshold = static_cast<int>(restart_threshold * restart_multiplier);
+	if (restart_threshold > restart_upper) {
+		restart_threshold = restart_lower;
+		restart_upper = static_cast<int>(restart_upper  * restart_multiplier);
+		if (verbose >= 1) cout << "new restart upper bound = " << restart_upper << endl;
+	}
+	if (verbose >=1) cout << "restart: new threshold = " << restart_threshold << endl;
+	++num_restarts;
+	for (unsigned int i = 1; i <= nvars; ++i)
+		if (dlevel[i] > 0) {
+			state[i] = VarState::V_UNASSIGNED;
+			dlevel[i] = 0;
+		}
+	trail.clear();
+	qhead = 0;
+	separators.clear();
+	conflicts_at_dl.clear();
+	if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) {
+		m_curr_activity = 0; // The activity does not really become 0. When it is reset in decide() it becomes the largets activity.
 		m_should_reset_iterators = true;
 	}
 	reset();
@@ -1132,19 +1382,47 @@ SolverState Solver::_solve() {
 	}
 }
 
+void PBSolver::debugScores() {
+	cout << "=== Debug Scores ===" << endl;
+	cout << "Variable Activities:" << endl;
+	for (Var v = 1; v < nvars+1; ++v) {
+		cout << "Var " << v
+			 << " state: " << static_cast<int>(state[v])
+			 << " activity: " << m_activity[v] << endl;
+	}
+	cout << "m_Score2Vars:" << endl;
+	for (auto it = m_Score2Vars.begin(); it != m_Score2Vars.end(); ++it) {
+		cout << "Score: " << it->first << " -> Vars: ";
+		for (auto v : it->second) {
+			cout << v << " ";
+		}
+		cout << endl;
+	}
+	cout << "=== End Debug Scores ===" << endl;
+}
+
 SolverState PBSolver::_solve() {
 	SolverState res;
+	debugScores();
 	while (true) {
 		if (timeout > 0 && cpuTime() - begin_time > timeout) return SolverState::TIMEOUT;
 		while (true) {
 			res = BCP();
+			debugScores();
 			if (res == SolverState::UNSAT) return res;
-			if (res == SolverState::CONFLICT)
+			if (res == SolverState::CONFLICT) {
 				cout << "CONFLICT" << endl;
-				// backtrack(analyze(opb[conflicting_clause_idx]));
+				if (state[2] == VarState::V_FALSE) {
+					cout << "DEBUG PLACE" << endl;
+				}
+				int k = analyze(opb[conflicting_clause_idx]);
+				backtrack(k);
+				debugScores();
+			}
 			else break;
 		}
 		res = decide();
+		debugScores();
 		if (res == SolverState::SAT) return res;
 	}
 }

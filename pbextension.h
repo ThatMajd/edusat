@@ -256,6 +256,43 @@ public:
     	}
     }
 
+	// --- Helper Functions ---
+
+	// Returns the coefficient associated with a literal in this clause.
+	// If the literal is not present, returns 0.
+	int getCoefficient(int lit) const {
+		for (size_t i = 0; i < literals.size(); i++) {
+			if (literals[i] == lit)
+				return coefficients[i];
+		}
+		return 0;
+	}
+
+	// Removes the given literal (and its coefficient) from this clause.
+	void removeLiteral(int lit) {
+		for (size_t i = 0; i < literals.size(); i++) {
+			if (literals[i] == lit) {
+				literals.erase(literals.begin() + i);
+				coefficients.erase(coefficients.begin() + i);
+				return;
+			}
+		}
+	}
+
+	// Adds a value to the coefficient for a given literal.
+	// If the literal exists, its coefficient is incremented by 'value'.
+	// Otherwise, the literal is inserted with the given coefficient.
+	void addCoefficient(int lit, int value) {
+		for (size_t i = 0; i < literals.size(); i++) {
+			if (literals[i] == lit) {
+				coefficients[i] += value;
+				return;
+			}
+		}
+		// If literal was not found, insert it.
+		insert(lit, value);
+	}
+
     // Check if the PB clause is satisfied under a given assignment
     bool is_satisfied(const std::unordered_map<Var, VarState>& assignment) {
         int total = 0;
@@ -558,7 +595,7 @@ class PBSolver {
 	SolverState decide();
 	void test();
 	SolverState BCP();
-	int  analyze(const Clause);
+	int  analyze(const PBClause);
 	inline int  getVal(Var v);
 	inline void add_clause(PBClause &c, int l, int r);
 	inline void add_unary_clause(Lit l);
@@ -570,6 +607,9 @@ class PBSolver {
 	// scores
 	inline void bumpVarScore(int idx);
 	inline void bumpLitScore(int lit_idx);
+
+	void debugScores();
+	int calculateSlack(const PBClause& clause);
 
 public:
 	PBSolver():
@@ -589,6 +629,7 @@ public:
 	void read_cnf(ifstream& in);
 
 	void read_opb(ifstream& in);
+
 
 	SolverState _solve();
 	void solve();
