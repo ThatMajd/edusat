@@ -280,20 +280,6 @@ public:
 
 	// --- Helper Functions ---
 
-	void update_sum(Lit assigned_lit) {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == assigned_lit) {
-				if (Neg(assigned_lit)) {
-					watched_sum -= coefficients[i];
-				}
-				else {
-					watched_sum += coefficients[i];
-				}
-				return;
-			}
-		}
-		Abort("literal doesn't exist", 1);
-	}
 
 	// Returns the coefficient associated with a literal in this clause.
 	// If the literal is not present, returns 0.
