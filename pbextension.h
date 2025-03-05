@@ -98,7 +98,6 @@ enum class SolverState{
 	UNDEF,
 	TIMEOUT
 } ;
-
 /***************** service functions **********************/
 
 #ifdef _MSC_VER
@@ -201,11 +200,7 @@ class PBClause {
     clause_t literals;       // List of literals (e.g., [1, -2, 3])
     std::vector<int> coefficients; // Coefficients for each literal (e.g., [2, 3, 1])
     int degree;              // Threshold (e.g., 4 for 2x₁ + 3x₂ + x₃ ≥ 4)
-
     int lw, rw;              // Watched literals (for efficient propagation)
-
-	std::vector<int> watches;
-	int watched_sum;
 
 public:
     PBClause() : degree(0) {}
@@ -238,13 +233,11 @@ public:
     int get_rw() const { return rw; }
     int get_lw_lit() const { return literals[lw]; }
     int get_rw_lit() const { return literals[rw]; }
-	int get_lw_coef() const { return coefficients[lw]; }
-	int get_rw_coef() const { return coefficients[rw]; }
     int lit(int i) const { return literals[i]; }
 	void reset() { literals.clear(), coefficients.clear(); }
     size_t size() const { return literals.size(); }
 
-	inline PBClauseState next_not_false(Lit assigned_lit);
+	inline PBClauseState next_not_false(bool is_left_watch, Lit other_watch, bool binary, int& loc);
 
 	void sort() {
     	std::vector<std::pair<int, int>> pairs;
@@ -262,66 +255,6 @@ public:
     		literals[i] = pairs[i].second;
     	}
     }
-
-	std::vector<int> init_watches() {
-		// function assumes the constraint is sorted
-		int curr_sum = 0;
-		int idx = 0;
-		while (curr_sum < degree  + coefficients[0]) {
-			watches.push_back(idx);
-			curr_sum += coefficients[idx];
-			idx++;
-		}
-		watched_sum = curr_sum;
-		return watches;
-	}
-
-
-
-	// --- Helper Functions ---
-
-
-	// Returns the coefficient associated with a literal in this clause.
-	// If the literal is not present, returns 0.
-	int getCoefficient(int lit) const {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == lit)
-				return coefficients[i];
-		}
-		return 0;
-	}
-
-	int l2idx(int lit) const {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == lit) return i;
-		}
-		return -1;
-	}
-
-	// Removes the given literal (and its coefficient) from this clause.
-	void removeLiteral(int lit) {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == lit) {
-				literals.erase(literals.begin() + i);
-				coefficients.erase(coefficients.begin() + i);
-				return;
-			}
-		}
-	}
-
-	// Adds a value to the coefficient for a given literal.
-	// If the literal exists, its coefficient is incremented by 'value'.
-	// Otherwise, the literal is inserted with the given coefficient.
-	void addCoefficient(int lit, int value) {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == lit) {
-				coefficients[i] += value;
-				return;
-			}
-		}
-		// If literal was not found, insert it.
-		insert(lit, value);
-	}
 
     // Check if the PB clause is satisfied under a given assignment
     bool is_satisfied(const std::unordered_map<Var, VarState>& assignment) {
@@ -569,6 +502,10 @@ class PBSolver {
 	vector<int> separators; // indices into trail showing increase in dl
 	vector<int> LitScore; // literal => frequency of this literal (# appearances in all clauses).
 	vector<vector<int> > watches;  // Lit => vector of clause indices into CNF
+
+	map<Var, vector<int>> watches_true;  // Lit => vector of clause indices into CNF
+	map<Var, vector<int>> watches_false;  // Lit => vector of clause indices into CNF
+
 	vector<VarState> state;  // current assignment
 	vector<VarState> prev_state; // for phase-saving: same as state, only that it is not reset to 0 upon backtracking.
 	vector<int> antecedent; // var => clause index in the cnf vector. For variables that their value was assigned in BCP, this is the clause that gave this variable its value.
@@ -625,7 +562,7 @@ class PBSolver {
 	SolverState decide();
 	void test();
 	SolverState BCP();
-	int  analyze(const PBClause);
+	int  analyze(const Clause);
 	inline int  getVal(Var v);
 	inline void add_clause(PBClause &c, int l, int r);
 	inline void add_unary_clause(Lit l);
@@ -637,9 +574,6 @@ class PBSolver {
 	// scores
 	inline void bumpVarScore(int idx);
 	inline void bumpLitScore(int lit_idx);
-
-	void debugScores();
-	int calculateSlack(const PBClause& clause);
 
 public:
 	PBSolver():
@@ -660,20 +594,10 @@ public:
 
 	void read_opb(ifstream& in);
 
-
 	SolverState _solve();
 	void solve();
 
-	void propagate_clause(PBClause c, int slack, int it) {
-		for (size_t i = 0; i < c.get_literals().size(); ++i) {
-			LitState ls = lit_state(c.get_literals()[i]); // Get current state from the solver.
-			int coeff = c.get_coefficients()[i];
-			if (ls == LitState::L_UNASSIGNED && coeff > slack) {
-				assert_lit(c.get_literals()[i]);  // Propagate this literal.
-				antecedent[l2v(c.get_literals()[i])] = it;  // Record the implication.
-			}
-		}
-	}
+
 
 
 // debugging
@@ -731,4 +655,3 @@ public:
 
 	void validate_assignment();
 };
-
