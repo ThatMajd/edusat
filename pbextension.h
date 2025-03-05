@@ -558,6 +558,8 @@ class PBSolver {
 	void initialize();
 	void reset_iterators(double activity_key = 0.0);
 
+	ClauseState propagate_assignment(int clause_idx);
+
 	// solving
 	SolverState decide();
 	void test();
