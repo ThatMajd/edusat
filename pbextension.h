@@ -237,6 +237,20 @@ public:
 	void reset() { literals.clear(), coefficients.clear(); }
     size_t size() const { return literals.size(); }
 
+	void set_literals(std::vector<Lit>& lits) {
+	    literals = lits;
+    }
+	void set_coefficients(std::vector<int>& coeffs) {
+	    coefficients = coeffs;
+    }
+
+	int get_coefficient(Lit l) {
+	    for (int i = 0; i < size(); i++) {
+		    if (l == literals[i] or ::negate(l) == literals[i]) return coefficients[i];
+	    }
+    	return 0;
+    }
+
 	inline PBClauseState next_not_false(bool is_left_watch, Lit other_watch, bool binary, int& loc);
 
 	void sort() {
@@ -256,67 +270,6 @@ public:
     	}
     }
 
-    // Check if the PB clause is satisfied under a given assignment
-    bool is_satisfied(const std::unordered_map<Var, VarState>& assignment) {
-        int total = 0;
-        for (size_t i = 0; i < literals.size(); ++i) {
-            Var v = l2v(literals[i]);
-            auto it = assignment.find(v);
-            if (it != assignment.end()) {
-                bool lit_sign = Neg(literals[i]);
-                bool var_assign = (it->second == VarState::V_TRUE);
-                if (lit_sign != var_assign) {
-                    total += coefficients[i];
-                }
-            }
-        }
-        return total >= degree;
-    }
-
-    // Propagate assignments to detect conflicts/implied literals
-    // Returns:
-    // - "conflict" if the constraint is unsatisfiable.
-    // - A vector of implied literals if assignments are required.
-    // - An empty vector if no implications exist.
-    std::pair<std::string, std::vector<Lit>> propagate(
-        const std::unordered_map<Var, VarState>& assignment
-    ) {
-        int current_sum = 0;
-        int unassigned_sum = 0;
-        std::vector<Lit> unassigned_lits;
-
-        for (size_t i = 0; i < literals.size(); ++i) {
-            Var v = l2v(literals[i]);
-            auto it = assignment.find(v);
-            if (it != assignment.end()) {
-                bool lit_sign = Neg(literals[i]);
-                bool var_assign = (it->second == VarState::V_TRUE);
-                if (lit_sign != var_assign) {
-                    current_sum += coefficients[i];
-                }
-            } else {
-                unassigned_sum += coefficients[i];
-                unassigned_lits.push_back(literals[i]);
-            }
-        }
-
-        // Conflict detection
-        if (current_sum + unassigned_sum < degree) {
-            return std::make_pair("conflict", std::vector<Lit>());
-        }
-
-        // Check for implied literals
-        std::vector<Lit> implied;
-        int threshold = degree - current_sum;
-        for (size_t i = 0; i < unassigned_lits.size(); ++i) {
-            if (coefficients[i] >= threshold) {
-                implied.push_back(unassigned_lits[i]);
-            }
-        }
-
-        return implied.empty() ? std::make_pair("no_imp", std::vector<Lit>())
-                               : std::make_pair("implied", implied);
-    }
 
     // Print the PB clause
     void print() const {
@@ -564,7 +517,10 @@ class PBSolver {
 	SolverState decide();
 	void test();
 	SolverState BCP();
-	int  analyze(const Clause);
+	int  analyze(const PBClause);
+	PBClause resolve( PBClause, PBClause, Lit);
+	PBClause reduce( PBClause, Lit);
+	PBClause cancel(PBClause conflict, PBClause reason, Lit pivot);
 	inline int  getVal(Var v);
 	inline void add_clause(PBClause &c, int l, int r);
 	inline void add_unary_clause(Lit l);
