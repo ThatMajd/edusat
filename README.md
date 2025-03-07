@@ -20,3 +20,9 @@
 
 ## Watch literal
 - https://www.cecs.uci.edu/~papers/compendium94-03/papers/2003/dac03/pdffiles/48_3.pdf
+
+
+## Notes from code
+1. $$a \overline{x} + b x = a(1-x)+bx$$
+if $b-a > 0$ $$a + x(b-a)$$
+if $b-a < 0$ $$b + \overline{x}(a-b)$$
