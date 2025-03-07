@@ -223,6 +223,9 @@ public:
     		cout << l << " ";} cout << ")";
     }
 
+	Lit literal_at(int i) {return literals[i];}
+	int coeff_at(int i) {return coefficients[i];}
+
     // Accessors
     clause_t& get_literals() { return literals; }
     std::vector<int>& get_coefficients() { return coefficients; }

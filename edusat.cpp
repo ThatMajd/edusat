@@ -493,14 +493,14 @@ void Solver::add_clause(Clause& c, int l, int r) {
 }
 
 void PBSolver::add_clause(PBClause& c, int l, int r) {
-	Assert(c.size() > 1) ;
+	// Assert(c.size() > 1) ;
 	c.lw_set(l);
 	c.rw_set(r);
 	int loc = static_cast<int>(opb.size());  // the first is in location 0 in cnf
 	int size = c.size();
 
-	watches[c.lit(l)].push_back(loc);
-	watches[c.lit(r)].push_back(loc);
+	// watches[c.lit(l)].push_back(loc);
+	// watches[c.lit(r)].push_back(loc);
 	opb.push_back(c);
 }
 
@@ -1029,49 +1029,48 @@ int Solver::analyze(const Clause conflicting) {
 }
 
 PBClause PBSolver::cancel(PBClause conflict, PBClause reason, Lit pivot) {
-	// We'll use a map to collect coefficients for each literal.
-	// The learned clause will be the "sum" of the two reduced clauses minus the pivot literal.
-	std::map<Lit, int> learnedTerms;
+	map<Var, map<Lit, int>> var_map;
 
-	// Process the conflict constraint.
-	// We expect the pivot to appear as itself.
-	std::vector<Lit> lits_conf = conflict.get_literals();
-	std::vector<int> coeffs_conf = conflict.get_coefficients();
-	for (size_t i = 0; i < lits_conf.size(); ++i) {
-		// Skip the pivot literal.
-		if (lits_conf[i] == pivot) continue;
-		learnedTerms[lits_conf[i]] += coeffs_conf[i];
+	for (int i=0; i < conflict.size(); ++i) {
+		var_map[l2v(conflict.literal_at(i))][conflict.literal_at(i)] += conflict.coeff_at(i);
+	}
+	for (int i=0; i < reason.size(); ++i) {
+		var_map[l2v(reason.literal_at(i))][reason.literal_at(i)] += reason.coeff_at(i);
 	}
 
-	// Process the reason constraint.
-	// We expect the pivot to appear as its negation in this clause.
-	std::vector<Lit> lits_reason = reason.get_literals();
-	std::vector<int> coeffs_reason = reason.get_coefficients();
-	for (size_t i = 0; i < lits_reason.size(); ++i) {
-		// Skip the negated pivot literal.
-		if (lits_reason[i] == ::negate(pivot)) continue;
-		learnedTerms[lits_reason[i]] += coeffs_reason[i];
+	int correcting_sum = 0;
+	PBClause new_clause;
+
+	// README 1
+	for (const auto &var_pair : var_map) {
+		std::cout << "Var " << var_pair.first << ":\n";
+		int a = 0 , b = 0;
+		for (const auto &lit_pair : var_pair.second) {
+			std::cout << "   Lit " << lit_pair.first << " : " << lit_pair.second << "\n";
+			Lit l = lit_pair.first;
+			int coeff = lit_pair.second;
+
+			if (Neg(l)) {
+				a += coeff;
+			} else {
+				b += coeff;
+			}
+		}
+		if ( b - a > 0) {
+			correcting_sum += a;
+			new_clause.insert(v2l(var_pair.first), b-a);
+		}
+		else if ( b - a < 0) {
+			correcting_sum += b;
+			new_clause.insert(v2l(-var_pair.first), a-b);
+		}
+		else if (b - a == 0) {
+			correcting_sum += a;
+			// The terms cancel out no need to add variable
+		}
 	}
-
-	// Compute the new degree.
-	// The cancellation rule gives: new_degree = conflict.degree + reason.degree - 1
-	// (assuming both reduced constraints had a normalized pivot coefficient of 1)
-	int new_degree = conflict.get_degree() + reason.get_degree() - 1;
-
-	// Reconstruct the learned clause from the collected terms.
-	std::vector<Lit> new_literals;
-	std::vector<int> new_coeffs;
-	for (auto &term : learnedTerms) {
-		new_literals.push_back(term.first);
-		new_coeffs.push_back(term.second);
-	}
-
-	PBClause learned;
-	learned.set_literals(new_literals);
-	learned.set_coefficients(new_coeffs);
-	learned.set_degree(new_degree);
-
-	return learned;
+	new_clause.set_degree(conflict.get_degree() + reason.get_degree() - correcting_sum);
+	return new_clause;
 }
 
 PBClause PBSolver::reduce(PBClause c, Lit pivot) {
@@ -1129,7 +1128,6 @@ int PBSolver::analyze(const PBClause conflicting) {
 			new_clause;
 	int resolve_num = 0,
 		bktrk = 0,
-		watch_lit = 0, // points to what literal in the learnt clause should be watched, other than the asserting one
 		antecedents_idx = 0;
 
 	Lit u;
@@ -1179,6 +1177,11 @@ int PBSolver::analyze(const PBClause conflicting) {
 		// Use the resolution function to compute the resolvent.
 		// 'u' is used as the pivot literal.
 		current_clause = resolve(current_clause, opb[ant], u);
+
+		if (current_clause.size() == 0 && current_clause.get_degree() > 0) {
+			bktrk = 0;
+			break;
+		}
 	}	while (resolve_num > 0);
 
 	for (clause_it it = literals.begin(); it != literals.end(); ++it)
@@ -1189,12 +1192,7 @@ int PBSolver::analyze(const PBClause conflicting) {
 		m_var_inc *= 1 / var_decay; // increasing importance of participating variables.
 
 	++num_learned;
-	// if (new_clause.size() == 1) { // unary clause
-	// 	add_unary_clause(Negated_u);
-	// }
-	// else {
-	// 	add_clause(new_clause, watch_lit, new_clause.size() - 1);
-	// }
+	add_clause(current_clause, 0, 1);
 
 
 	if (verbose_now()) {
@@ -1366,11 +1364,11 @@ void Solver::solve() {
 }
 
 void PBSolver::solve() {
-	state[1] = VarState::V_TRUE;
-	state[2] = state[3] = state[4] = state[5] = VarState::V_FALSE;
-
-	resolve(opb[1], opb[0], 4);
-	return;
+	// state[1] = VarState::V_TRUE;
+	// state[2] = state[3] = state[4] = state[5] = VarState::V_FALSE;
+	//
+	// resolve(opb[1], opb[0], 4);
+	// return;
 	SolverState res = _solve();
 	Assert(res == SolverState::SAT || res == SolverState::UNSAT || res == SolverState::TIMEOUT);
 	S.print_stats();
