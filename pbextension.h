@@ -197,10 +197,10 @@ public:
 };
 
 class PBClause {
-    clause_t literals;       // List of literals (e.g., [1, -2, 3])
-    std::vector<int> coefficients; // Coefficients for each literal (e.g., [2, 3, 1])
-    int degree;              // Threshold (e.g., 4 for 2x₁ + 3x₂ + x₃ ≥ 4)
-    int lw, rw;              // Watched literals (for efficient propagation)
+    clause_t literals;				// List of literals (e.g., [1, -2, 3])
+    std::vector<int> coefficients;	// Coefficients for each literal (e.g., [2, 3, 1])
+    int degree;						// Threshold (e.g., 4 for 2x₁ + 3x₂ + x₃ ≥ 4)
+    int lw, rw;						// Watched literals (for efficient propagation)
 
 public:
     PBClause() : degree(0) {}
@@ -273,11 +273,29 @@ public:
     	}
     }
 
+	Lit get_lit_with_pivot(Lit pivot) {
+		for (size_t i = 0; i < literals.size(); ++i) {
+			if (literals[i] == pivot || ::negate(literals[i]) == pivot) {
+				return literals[i];
+			}
+		}
+		return -1;
+	}
+	void update_pivot(Lit pivot) {
+		for (size_t i = 0; i < literals.size(); ++i) {
+			if (literals[i] == pivot || ::negate(literals[i]) == pivot) {
+				literals[i] = ::negate(literals[i]);
+			}
+		}
+		degree--;
+	}
 
     // Print the PB clause
     void print() const {
         for (size_t i = 0; i < literals.size(); ++i) {
-            std::cout << coefficients[i] << "*" << l2v(literals[i]) << " + ";
+            std::cout << coefficients[i];
+        	if (Neg(literals[i])) std::cout << '~';
+        	cout << "x" << l2v(literals[i]) << " + ";
         }
         std::cout << ">= " << degree << std::endl;
     }
@@ -469,6 +487,8 @@ class PBSolver {
 	vector<int> dlevel; // var => decision level in which this variable was assigned its value.
 	vector<int> conflicts_at_dl; // decision level => # of conflicts under it. Used for local restarts.
 
+	bool global_conflict; // if we learned 0 >= 1 constraint
+
 	// Used by VAR_DH_MINISAT:
 	map<double, unordered_set<Var>, greater<double>> m_Score2Vars; // 'greater' forces an order from large to small of the keys
 	map<double, unordered_set<Var>, greater<double>>::iterator m_Score2Vars_it;
@@ -495,7 +515,7 @@ class PBSolver {
 		restart_lower,
 		restart_upper;
 
-	Lit 		asserted_lit;
+	std::vector<Lit> 		asserted_lits;
 
 	float restart_multiplier;
 
@@ -524,6 +544,27 @@ class PBSolver {
 	PBClause resolve( PBClause, PBClause, Lit);
 	PBClause reduce( PBClause, Lit);
 	PBClause cancel(PBClause conflict, PBClause reason, Lit pivot);
+	void update_asserted_lits(PBClause c) {
+		asserted_lits.clear();
+
+		clause_t literals = c.get_literals();
+		std::vector<int> coefficients = c.get_coefficients();
+		int degree = c.get_degree();
+
+		int slack = -degree;
+
+		for (int i=0; i < c.size(); ++i) {
+			if (lit_state(literals[i]) != LitState::L_UNSAT) {
+				slack += coefficients[i];
+			}
+		}
+		if (slack < 0) { return;}
+		for (int i=0; i < c.size(); ++i) {
+			if (lit_state(literals[i]) == LitState::L_UNASSIGNED && coefficients[i] > slack) {
+				asserted_lits.push_back(literals[i]);
+			}
+		}
+	}
 	inline int  getVal(Var v);
 	inline void add_clause(PBClause &c, int l, int r);
 	inline void add_unary_clause(Lit l);
