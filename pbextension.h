@@ -98,6 +98,12 @@ enum class SolverState{
 	UNDEF,
 	TIMEOUT
 } ;
+
+enum class AssertionStatus {
+	NONASSERTING, // The constraint does not force a propagation.
+	ASSERTING,    // The constraint is tight and forces a propagation.
+	FALSIFIED     // The constraint is already violated.
+};
 /***************** service functions **********************/
 
 #ifdef _MSC_VER
@@ -253,6 +259,21 @@ public:
 	    }
     	return 0;
     }
+	bool hasLit(Lit l) {
+	    for (int i = 0; i < size(); i++) {
+		    if (l == literals[i]) return true;
+	    }
+    	return false;
+    }
+
+	bool can_be_satisfied() {
+    	int sum = 0;
+	    for (int coeff : coefficients) {
+	    	sum += coeff;
+			if (sum >= degree) return true;
+	    }
+    	return false;
+    }
 
 	inline PBClauseState next_not_false(bool is_left_watch, Lit other_watch, bool binary, int& loc);
 
@@ -273,22 +294,13 @@ public:
     	}
     }
 
-	Lit get_lit_with_pivot(Lit pivot) {
-		for (size_t i = 0; i < literals.size(); ++i) {
-			if (literals[i] == pivot || ::negate(literals[i]) == pivot) {
-				return literals[i];
-			}
+	int get_lit_idx(Lit l) {
+		for (int i = 0; i < size(); i++) {
+			if (l == literals[i]) return i;
 		}
 		return -1;
 	}
-	void update_pivot(Lit pivot) {
-		for (size_t i = 0; i < literals.size(); ++i) {
-			if (literals[i] == pivot || ::negate(literals[i]) == pivot) {
-				literals[i] = ::negate(literals[i]);
-			}
-		}
-		degree--;
-	}
+
 
     // Print the PB clause
     void print() const {
@@ -536,6 +548,14 @@ class PBSolver {
 
 	ClauseState propagate_assignment(int clause_idx);
 
+	void ant_graph() {
+		for (Var v=1; v<=nvars; ++v) {
+			cout << v << " - ";
+			if (antecedent[v] > -1) {opb[antecedent[v]].print();}
+			else cout << "None" << endl;
+		}
+	}
+
 	// solving
 	SolverState decide();
 	void test();
@@ -544,7 +564,7 @@ class PBSolver {
 	PBClause resolve( PBClause, PBClause, Lit);
 	PBClause reduce( PBClause, Lit);
 	PBClause cancel(PBClause conflict, PBClause reason, Lit pivot);
-	void update_asserted_lits(PBClause c) {
+	void update_asserted_lits(PBClause c, int lvl) {
 		asserted_lits.clear();
 
 		clause_t literals = c.get_literals();
@@ -557,18 +577,29 @@ class PBSolver {
 			if (lit_state(literals[i]) != LitState::L_UNSAT) {
 				slack += coefficients[i];
 			}
+			else if (lit_state(literals[i]) == LitState::L_UNSAT && dlevel[l2v(literals[i])] == lvl) {
+				slack += coefficients[i];
+			}
 		}
 		if (slack < 0) { return;}
 		for (int i=0; i < c.size(); ++i) {
-			if (lit_state(literals[i]) == LitState::L_UNASSIGNED && coefficients[i] > slack) {
-				asserted_lits.push_back(literals[i]);
+			if (coefficients[i] > slack) {
+				if (lit_state(literals[i]) == LitState::L_UNASSIGNED) {
+					asserted_lits.push_back(literals[i]);
+					continue;
+				}
+				if (lit_state(literals[i]) == LitState::L_UNSAT && dlevel[l2v(literals[i])] == lvl) {
+					asserted_lits.push_back(literals[i]);
+				}
 			}
 		}
 	}
+	AssertionStatus is_asserting(PBClause c, int lvl);
 	inline int  getVal(Var v);
 	inline void add_clause(PBClause &c, int l, int r);
 	inline void add_unary_clause(Lit l);
 	inline void assert_lit(Lit l);
+	inline void remove_assignment(Lit l);
 	void m_rescaleScores(double& new_score);
 	inline void backtrack(int k);
 	void restart();
