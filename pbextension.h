@@ -33,7 +33,7 @@ typedef vector<Lit> trail_t;
 #define Rescale_threshold 1e100
 #define Assignment_file "assignment.txt"
 
-int verbose = 0;
+int verbose = 1;
 double begin_time;
 double timeout = 0.0;
 
@@ -595,6 +595,9 @@ class PBSolver {
 		}
 	}
 	AssertionStatus is_asserting(PBClause c, int lvl);
+
+	void print_clause(PBClause c);
+
 	inline int  getVal(Var v);
 	inline void add_clause(PBClause &c, int l, int r);
 	inline void add_unary_clause(Lit l);

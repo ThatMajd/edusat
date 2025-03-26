@@ -264,7 +264,7 @@ void PBSolver::read_opb(std::ifstream& in) {
 			pb.set_degree(rhs + normalization_sum);
 			normalization_sum = 0;
 			add_clause(pb, 0, 1);
-			pb.print();
+			// pb.print();
 			pb.reset();
 
 			in >> token1;
@@ -580,6 +580,15 @@ SolverState Solver::decide(){
 	Lit best_lit = 0;
 	int max_score = 0;
 	Var bestVar = 0;
+
+	for (Var i = 1; i < state.size(); ++i) {
+		if (state[i] == VarState::V_UNASSIGNED) {
+			best_lit = v2l(-i);
+			goto Apply_decision;
+		}
+	}
+	return SolverState::SAT;
+
 	switch (VarDecHeuristic) {
 
 	case  VAR_DEC_HEURISTIC::MINISAT: {
@@ -684,7 +693,6 @@ SolverState PBSolver::decide(){
 	Apply_decision:
 		dl++; // increase decision level
 	if (dl > max_dl) {
-		cout << dl << endl;
 		max_dl = dl;
 		separators.push_back(trail.size());
 		conflicts_at_dl.push_back(num_learned);
@@ -942,11 +950,7 @@ SolverState Solver::BCP() {
 
 SolverState PBSolver::BCP() {
     if (verbose_now()) cout << "BCP" << endl;
-    if (1) cout << "qhead = " << qhead << " trail-size = " << trail.size() << endl;
-
-	if (qhead == 1194) {
-		cout << "DEBUG" << endl;
-	}
+    if (verbose_now()) cout << "qhead = " << qhead << " trail-size = " << trail.size() << endl;
 
 
 	if (global_conflict) return SolverState::UNSAT;
@@ -1366,10 +1370,29 @@ AssertionStatus PBSolver::is_asserting(PBClause c, int lvl) {
 	return AssertionStatus::FALSIFIED;
 }
 
+void PBSolver::print_clause(PBClause c) {
+	std::string constraint = "";
+	std::string assignment = "";
+	std::string dlevel = "";
+
+	for (int i=0; i < c.size(); ++i) {
+		constraint += c.coeff_at(i);
+		if (Neg(c.literal_at(i))) std::cout << '~';
+		cout << "x" << l2v(c.literal_at(i)) << "\t";
+
+		assignment += std::to_string(int(lit_state(c.literal_at(i)))) + "\t\t";
+		dlevel += std::to_string(dlevel[l2v(c.literal_at(i))]) + "\t\t";
+	}
+	constraint += ">= " + c.get_degree();
+	cout << constraint << endl;
+	cout << assignment << endl;
+	cout << dlevel << endl;
+}
 
 int PBSolver::analyze(const PBClause conflicting) {
 	if (verbose_now()) cout << "analyze" << endl;
-	PBClause	confl = conflicting, reason_clause;
+	PBClause	confl = conflicting;
+
 	// cout << "- CONFLICT -" << endl;
 	// confl.print();
 
@@ -1380,42 +1403,44 @@ int PBSolver::analyze(const PBClause conflicting) {
 		if (t_it == trail.rend()){
 			break;
 		}
+
 		Lit l = *t_it;
 		Var v = l2v(l);
+		int ant = antecedent[v];
 
+		if (ant == -1) {
+			// We reached a decision by the solver
+			AssertionStatus asserting = is_asserting(confl, decision_level);
 
-		if (confl.hasLit(::negate(l))) {
-			AssertionStatus status = is_asserting(confl, decision_level);
-
-			if (status == AssertionStatus::ASSERTING) {
-				asserted_lits.clear();
-				asserted_lits.push_back(::negate(*(trail.begin() + separators[decision_level])));
+			if (asserting == AssertionStatus::ASSERTING) {
+				if (*(trail.begin() + separators[decision_level]) == l) cout << "we good" << endl;
+				update_asserted_lits(confl, decision_level);
+				decision_level--;
 				break;
 			}
-
-			else if (status == AssertionStatus::FALSIFIED) {
+			else if (asserting == AssertionStatus::FALSIFIED) {
 				int target = *(trail.begin() + separators[decision_level - 1] - 1);
 
 				while (*t_it != target) {t_it++;}
 
 				decision_level--;
 				continue;
-			}
-			int ant = antecedent[v];
-			if (ant != -1) {
-				// assert(ant != -1);
-				confl = reduce(confl, ::negate(l));
-				reason_clause = opb[ant];
 
-				if (!reason_clause.hasLit(l)) {
-					cout << "Reason has no literal " << l << endl;
-				}
-				confl = resolve(confl, reason_clause, l);
-				applied_resolution = true;
 			}
 		}
+		if (confl.hasLit(::negate(l)) && ant != -1) {
+			assert(ant != -1);
+			confl = reduce(confl, ::negate(l));
+			PBClause reason_clause = opb[ant];
+
+			if (!reason_clause.hasLit(l)) {
+				cout << "Reason has no literal " << l << endl;
+			}
+			confl = resolve(confl, reason_clause, l);
+			applied_resolution = true;
+		}
 		// remove_assignment(l);
-		if (antecedent[v] == -1) decision_level--;
+		// if (antecedent[v] == -1) decision_level--;
 		++t_it;
 	}
 	if ((confl.size() == 0 && confl.get_degree() > 0) || !confl.can_be_satisfied()) {
@@ -1441,9 +1466,136 @@ int PBSolver::analyze(const PBClause conflicting) {
 		opb.erase(opb.begin() + conflicting_clause_idx);
 		opb.push_back(confl);
 	}
-	cout << "- Backtracking to " << decision_level << endl;
-	return decision_level;
+	// cout << "- Backtracking to " << decision_level << endl;
+	// cout << "- Learned the following constraint " << decision_level << endl;
+	// confl.print();
+	int bktrk = 0;
+	for (int i = 0; i < confl.size(); i++) {
+		Var v = l2v(confl.literal_at(i));
+		int c_dl = dlevel[v];
+		if (c_dl == dl) {continue;}
+		if (c_dl > bktrk) {
+			bktrk = c_dl;
+		}
+	}
+	if (!(num_learned % 1000)) {
+		cout << "Learned: "<< num_learned <<" clauses" << endl;
+	}
+	return bktrk;
 }
+
+// int PBSolver::analyze(const PBClause conflicting) {
+// 	if (verbose_now()) cout << "analyze" << endl;
+// 	PBClause	confl = conflicting,
+// 			reason_clause;
+// 	int resolve_num = 0,
+// 		bktrk = 0;
+// 	bool applied_resolution = false;
+//
+// 	cout << "conflicting" << endl;
+// 	confl.print();
+//
+// 	Lit u;
+// 	Var v;
+// 	trail_t::reverse_iterator t_it = trail.rbegin();
+// 	do {
+// 		for (int i = 0; i < confl.size(); ++i) {
+// 			Lit lit = confl.literal_at(i);
+// 			int coeff = confl.coeff_at(i);
+//
+// 			v = l2v(lit);
+// 			if (!marked[v]) {
+// 				marked[v] = true;
+// 				if (dlevel[v] == dl) ++resolve_num;
+// 				else { // literals from previos decision levels (roots) are entered to the learned clause.
+// 					if (lit_state(lit) == LitState::L_UNASSIGNED) continue;
+//
+// 					// new_clause.insert(lit, coeff);
+// 					if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT) bumpVarScore(v);
+// 					if (ValDecHeuristic == VAL_DEC_HEURISTIC::LITSCORE) bumpLitScore(lit);
+// 					int c_dl = dlevel[v];
+// 					if (c_dl > bktrk) {
+// 						bktrk = c_dl;
+// 					}
+// 				}
+// 			}
+// 		}
+//
+// 		if (t_it == trail.rend()){
+// 			break;
+// 		}
+// 		while (t_it != trail.rend()) {
+// 			u = *t_it;
+// 			v = l2v(u);
+// 			++t_it;
+// 			if (marked[v]) break;
+// 		}
+//
+// 		marked[v] = false;
+// 		--resolve_num;
+// 		if(!resolve_num) continue;
+// 		int ant = antecedent[v];
+//
+// 		if (confl.hasLit(::negate(u)) && ant != -1) {
+// 			assert(ant != -1);
+// 			confl = reduce(confl, ::negate(u));
+// 			reason_clause = opb[ant];
+//
+// 			if (!reason_clause.hasLit(u)) {
+// 				cout << "Reason has no literal " << u << endl;
+// 			}
+// 			confl = resolve(confl, reason_clause, u);
+// 			applied_resolution = true;
+// 		}
+//
+//
+// 		if ((confl.size() == 0 && confl.get_degree() > 0) || !confl.can_be_satisfied()) {
+// 			global_conflict = true;
+// 			bktrk = 0;
+// 			break;
+// 		}
+// 	}	while (resolve_num > 0);
+//
+// 	std::vector<Lit> literals = confl.get_literals();
+// 	for (clause_it it = literals.begin(); it != literals.end(); ++it)
+// 		marked[l2v(*it)] = false;
+//
+//
+//
+// 	if (VarDecHeuristic == VAR_DEC_HEURISTIC::MINISAT)
+// 		m_var_inc *= 1 / var_decay; // increasing importance of participating variables.
+//
+// 	asserted_lits.clear();
+// 	asserted_lits.push_back(::negate(u));
+// 	if (applied_resolution) {
+// 		// update_asserted_lits(current_clause);
+// 		++num_learned;
+// 		opb.push_back(confl);
+//
+// 		Lit l;
+// 		for (int i = 0; i < confl.size(); i++) {
+// 			l = confl.literal_at(i);
+// 			if (Neg(l)) {
+// 				watches_false[l2v(l)].push_back(opb.size() - 1);
+// 			} else {
+// 				watches_true[l2v(l)].push_back(opb.size() - 1);
+// 			}
+// 		}
+// 		// add_clause(current_clause, 0 , 1);
+// 	}
+//
+//
+// 	if (verbose_now()) {
+// 		cout << endl;
+// 		cout << " learnt clauses:  " << num_learned;
+// 		cout << " Backtracking to level " << bktrk << endl;
+// 	}
+//
+// 	if (verbose >= 1 && !(num_learned % 1000)) {
+// 		cout << "Learned: "<< num_learned <<" clauses" << endl;
+// 	}
+// 	return bktrk;
+// }
 
 void Solver::backtrack(int k) {
 	if (verbose_now()) cout << "backtrack" << endl;
@@ -1708,7 +1860,7 @@ SolverState PBSolver::_solve() {
 				// cout << "CONFLICT" << endl;
 				int k = analyze(opb[conflicting_clause_idx]);
 				backtrack(k);
-				cout << "- AT LEVEL = " << dl << endl;
+				// cout << "- AT LEVEL = " << dl << endl;
 
 				// ant_graph();
 			}
@@ -1733,7 +1885,9 @@ int main(int argc, char** argv){
 	if (!in.good()) Abort("cannot read input file", 1);
 	cout << "This is edusat" << endl;
 	PB_S.read_opb(in);
+	// S.read_cnf(in);
 	in.close();
+	// S.solve();
 	PB_S.solve();
 
 
