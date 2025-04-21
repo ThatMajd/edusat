@@ -33,7 +33,7 @@ typedef vector<Lit> trail_t;
 #define Rescale_threshold 1e100
 #define Assignment_file "assignment.txt"
 
-int verbose = 0;
+int verbose = 1;
 double begin_time;
 double timeout = 0.0;
 
@@ -99,6 +99,11 @@ enum class SolverState{
 	TIMEOUT
 } ;
 
+enum class AssertionStatus {
+	NONASSERTING, // The constraint does not force a propagation.
+	ASSERTING,    // The constraint is tight and forces a propagation.
+	FALSIFIED     // The constraint is already violated.
+};
 /***************** service functions **********************/
 
 #ifdef _MSC_VER
@@ -198,14 +203,10 @@ public:
 };
 
 class PBClause {
-    clause_t literals;       // List of literals (e.g., [1, -2, 3])
-    std::vector<int> coefficients; // Coefficients for each literal (e.g., [2, 3, 1])
-    int degree;              // Threshold (e.g., 4 for 2x₁ + 3x₂ + x₃ ≥ 4)
-
-    int lw, rw;              // Watched literals (for efficient propagation)
-
-	std::vector<int> watches;
-	int watched_sum;
+    clause_t literals;				// List of literals (e.g., [1, -2, 3])
+    std::vector<int> coefficients;	// Coefficients for each literal (e.g., [2, 3, 1])
+    int degree;						// Threshold (e.g., 4 for 2x₁ + 3x₂ + x₃ ≥ 4)
+    int lw, rw;						// Watched literals (for efficient propagation)
 
 public:
     PBClause() : degree(0) {}
@@ -228,6 +229,9 @@ public:
     		cout << l << " ";} cout << ")";
     }
 
+	Lit literal_at(int i) {return literals[i];}
+	int coeff_at(int i) {return coefficients[i];}
+
     // Accessors
     clause_t& get_literals() { return literals; }
     std::vector<int>& get_coefficients() { return coefficients; }
@@ -238,13 +242,40 @@ public:
     int get_rw() const { return rw; }
     int get_lw_lit() const { return literals[lw]; }
     int get_rw_lit() const { return literals[rw]; }
-	int get_lw_coef() const { return coefficients[lw]; }
-	int get_rw_coef() const { return coefficients[rw]; }
     int lit(int i) const { return literals[i]; }
 	void reset() { literals.clear(), coefficients.clear(); }
     size_t size() const { return literals.size(); }
 
-	inline PBClauseState next_not_false(Lit assigned_lit);
+	void set_literals(std::vector<Lit>& lits) {
+	    literals = lits;
+    }
+	void set_coefficients(std::vector<int>& coeffs) {
+	    coefficients = coeffs;
+    }
+
+	int get_coefficient(Lit l) {
+	    for (int i = 0; i < size(); i++) {
+		    if (l == literals[i] or ::negate(l) == literals[i]) return coefficients[i];
+	    }
+    	return 0;
+    }
+	bool hasLit(Lit l) {
+	    for (int i = 0; i < size(); i++) {
+		    if (l == literals[i]) return true;
+	    }
+    	return false;
+    }
+
+	bool can_be_satisfied() {
+    	int sum = 0;
+	    for (int coeff : coefficients) {
+	    	sum += coeff;
+			if (sum >= degree) return true;
+	    }
+    	return false;
+    }
+
+	inline PBClauseState next_not_false(bool is_left_watch, Lit other_watch, bool binary, int& loc);
 
 	void sort() {
     	std::vector<std::pair<int, int>> pairs;
@@ -263,146 +294,20 @@ public:
     	}
     }
 
-	std::vector<int> init_watches() {
-		// function assumes the constraint is sorted
-		int curr_sum = 0;
-		int idx = 0;
-		while (curr_sum < degree  + coefficients[0]) {
-			watches.push_back(idx);
-			curr_sum += coefficients[idx];
-			idx++;
-		}
-		watched_sum = curr_sum;
-		return watches;
-	}
-
-
-
-	// --- Helper Functions ---
-
-	void update_sum(Lit assigned_lit) {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == assigned_lit) {
-				if (Neg(assigned_lit)) {
-					watched_sum -= coefficients[i];
-				}
-				else {
-					watched_sum += coefficients[i];
-				}
-				return;
-			}
-		}
-		Abort("literal doesn't exist", 1);
-	}
-
-	// Returns the coefficient associated with a literal in this clause.
-	// If the literal is not present, returns 0.
-	int getCoefficient(int lit) const {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == lit)
-				return coefficients[i];
-		}
-		return 0;
-	}
-
-	int l2idx(int lit) const {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == lit) return i;
+	int get_lit_idx(Lit l) {
+		for (int i = 0; i < size(); i++) {
+			if (l == literals[i]) return i;
 		}
 		return -1;
 	}
 
-	// Removes the given literal (and its coefficient) from this clause.
-	void removeLiteral(int lit) {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == lit) {
-				literals.erase(literals.begin() + i);
-				coefficients.erase(coefficients.begin() + i);
-				return;
-			}
-		}
-	}
-
-	// Adds a value to the coefficient for a given literal.
-	// If the literal exists, its coefficient is incremented by 'value'.
-	// Otherwise, the literal is inserted with the given coefficient.
-	void addCoefficient(int lit, int value) {
-		for (size_t i = 0; i < literals.size(); i++) {
-			if (literals[i] == lit) {
-				coefficients[i] += value;
-				return;
-			}
-		}
-		// If literal was not found, insert it.
-		insert(lit, value);
-	}
-
-    // Check if the PB clause is satisfied under a given assignment
-    bool is_satisfied(const std::unordered_map<Var, VarState>& assignment) {
-        int total = 0;
-        for (size_t i = 0; i < literals.size(); ++i) {
-            Var v = l2v(literals[i]);
-            auto it = assignment.find(v);
-            if (it != assignment.end()) {
-                bool lit_sign = Neg(literals[i]);
-                bool var_assign = (it->second == VarState::V_TRUE);
-                if (lit_sign != var_assign) {
-                    total += coefficients[i];
-                }
-            }
-        }
-        return total >= degree;
-    }
-
-    // Propagate assignments to detect conflicts/implied literals
-    // Returns:
-    // - "conflict" if the constraint is unsatisfiable.
-    // - A vector of implied literals if assignments are required.
-    // - An empty vector if no implications exist.
-    std::pair<std::string, std::vector<Lit>> propagate(
-        const std::unordered_map<Var, VarState>& assignment
-    ) {
-        int current_sum = 0;
-        int unassigned_sum = 0;
-        std::vector<Lit> unassigned_lits;
-
-        for (size_t i = 0; i < literals.size(); ++i) {
-            Var v = l2v(literals[i]);
-            auto it = assignment.find(v);
-            if (it != assignment.end()) {
-                bool lit_sign = Neg(literals[i]);
-                bool var_assign = (it->second == VarState::V_TRUE);
-                if (lit_sign != var_assign) {
-                    current_sum += coefficients[i];
-                }
-            } else {
-                unassigned_sum += coefficients[i];
-                unassigned_lits.push_back(literals[i]);
-            }
-        }
-
-        // Conflict detection
-        if (current_sum + unassigned_sum < degree) {
-            return std::make_pair("conflict", std::vector<Lit>());
-        }
-
-        // Check for implied literals
-        std::vector<Lit> implied;
-        int threshold = degree - current_sum;
-        for (size_t i = 0; i < unassigned_lits.size(); ++i) {
-            if (coefficients[i] >= threshold) {
-                implied.push_back(unassigned_lits[i]);
-            }
-        }
-
-        return implied.empty() ? std::make_pair("no_imp", std::vector<Lit>())
-                               : std::make_pair("implied", implied);
-    }
 
     // Print the PB clause
     void print() const {
         for (size_t i = 0; i < literals.size(); ++i) {
-            std::cout << coefficients[i] << "*" << l2v(literals[i]) << " + ";
+            std::cout << coefficients[i];
+        	if (Neg(literals[i])) std::cout << '~';
+        	cout << "x" << l2v(literals[i]) << " + ";
         }
         std::cout << ">= " << degree << std::endl;
     }
@@ -583,12 +488,18 @@ class PBSolver {
 	vector<int> separators; // indices into trail showing increase in dl
 	vector<int> LitScore; // literal => frequency of this literal (# appearances in all clauses).
 	vector<vector<int> > watches;  // Lit => vector of clause indices into CNF
+
+	map<Var, vector<int>> watches_true;  // Lit => vector of clause indices into CNF
+	map<Var, vector<int>> watches_false;  // Lit => vector of clause indices into CNF
+
 	vector<VarState> state;  // current assignment
 	vector<VarState> prev_state; // for phase-saving: same as state, only that it is not reset to 0 upon backtracking.
 	vector<int> antecedent; // var => clause index in the cnf vector. For variables that their value was assigned in BCP, this is the clause that gave this variable its value.
 	vector<bool> marked;	// var => seen during analyze()
 	vector<int> dlevel; // var => decision level in which this variable was assigned its value.
 	vector<int> conflicts_at_dl; // decision level => # of conflicts under it. Used for local restarts.
+
+	bool global_conflict; // if we learned 0 >= 1 constraint
 
 	// Used by VAR_DH_MINISAT:
 	map<double, unordered_set<Var>, greater<double>> m_Score2Vars; // 'greater' forces an order from large to small of the keys
@@ -616,7 +527,7 @@ class PBSolver {
 		restart_lower,
 		restart_upper;
 
-	Lit 		asserted_lit;
+	std::vector<Lit> 		asserted_lits;
 
 	float restart_multiplier;
 
@@ -635,15 +546,63 @@ class PBSolver {
 	void initialize();
 	void reset_iterators(double activity_key = 0.0);
 
+	ClauseState propagate_assignment(int clause_idx);
+
+	void ant_graph() {
+		for (Var v=1; v<=nvars; ++v) {
+			cout << v << " - ";
+			if (antecedent[v] > -1) {opb[antecedent[v]].print();}
+			else cout << "None" << endl;
+		}
+	}
+
 	// solving
 	SolverState decide();
 	void test();
 	SolverState BCP();
 	int  analyze(const PBClause);
+	PBClause resolve( PBClause, PBClause, Lit);
+	PBClause reduce( PBClause, Lit);
+	PBClause cancel(PBClause conflict, PBClause reason, Lit pivot);
+	void update_asserted_lits(PBClause c, int lvl) {
+		asserted_lits.clear();
+
+		clause_t literals = c.get_literals();
+		std::vector<int> coefficients = c.get_coefficients();
+		int degree = c.get_degree();
+
+		int slack = -degree;
+
+		for (int i=0; i < c.size(); ++i) {
+			if (lit_state(literals[i]) != LitState::L_UNSAT) {
+				slack += coefficients[i];
+			}
+			else if (lit_state(literals[i]) == LitState::L_UNSAT && dlevel[l2v(literals[i])] == lvl) {
+				slack += coefficients[i];
+			}
+		}
+		if (slack < 0) { return;}
+		for (int i=0; i < c.size(); ++i) {
+			if (coefficients[i] > slack) {
+				if (lit_state(literals[i]) == LitState::L_UNASSIGNED) {
+					asserted_lits.push_back(literals[i]);
+					continue;
+				}
+				if (lit_state(literals[i]) == LitState::L_UNSAT && dlevel[l2v(literals[i])] == lvl) {
+					asserted_lits.push_back(literals[i]);
+				}
+			}
+		}
+	}
+	AssertionStatus is_asserting(PBClause c, int lvl);
+
+	void print_clause(PBClause c);
+
 	inline int  getVal(Var v);
 	inline void add_clause(PBClause &c, int l, int r);
 	inline void add_unary_clause(Lit l);
 	inline void assert_lit(Lit l);
+	inline void remove_assignment(Lit l);
 	void m_rescaleScores(double& new_score);
 	inline void backtrack(int k);
 	void restart();
@@ -651,9 +610,6 @@ class PBSolver {
 	// scores
 	inline void bumpVarScore(int idx);
 	inline void bumpLitScore(int lit_idx);
-
-	void debugScores();
-	int calculateSlack(const PBClause& clause);
 
 public:
 	PBSolver():
@@ -674,20 +630,10 @@ public:
 
 	void read_opb(ifstream& in);
 
-
 	SolverState _solve();
 	void solve();
 
-	void propagate_clause(PBClause c, int slack, int it) {
-		for (size_t i = 0; i < c.get_literals().size(); ++i) {
-			LitState ls = lit_state(c.get_literals()[i]); // Get current state from the solver.
-			int coeff = c.get_coefficients()[i];
-			if (ls == LitState::L_UNASSIGNED && coeff > slack) {
-				assert_lit(c.get_literals()[i]);  // Propagate this literal.
-				antecedent[l2v(c.get_literals()[i])] = it;  // Record the implication.
-			}
-		}
-	}
+
 
 
 // debugging
@@ -745,4 +691,3 @@ public:
 
 	void validate_assignment();
 };
-
